@@ -41,7 +41,17 @@ from .microduck_ground_pick_env_cfg import (
 )
 from .microduck_ball_kick_env_cfg import (
     make_microduck_ball_kick_env_cfg,
+    make_microduck_ball_kick_dual_env_cfg,
     MicroduckBallKickRlCfg,
+    MicroduckBallKickDualRlCfg,
+)
+from .microduck_ball_dribble_env_cfg import (
+    make_microduck_ball_dribble_env_cfg,
+    MicroduckBallDribbleRlCfg,
+)
+from .microduck_ball_slalom_env_cfg import (
+    make_microduck_ball_slalom_env_cfg,
+    MicroduckBallSlalomRlCfg,
 )
 from .microduck_sitstand_env_cfg import (
     make_microduck_sitstand_env_cfg,
@@ -161,6 +171,33 @@ register_mjlab_task(
     env_cfg=make_microduck_ball_kick_env_cfg(),
     play_env_cfg=make_microduck_ball_kick_env_cfg(play=True),
     rl_cfg=MicroduckBallKickRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# BallKickDual — follow one ball and reselect the closer foot after each contact.
+register_mjlab_task(
+    task_id="Mjlab-BallKickDual-Flat-MicroDuck",
+    env_cfg=make_microduck_ball_kick_dual_env_cfg(),
+    play_env_cfg=make_microduck_ball_kick_dual_env_cfg(play=True),
+    rl_cfg=MicroduckBallKickDualRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# BallDribble — guide the same ball toward a sampled target direction.
+register_mjlab_task(
+    task_id="Mjlab-BallDribble-Flat-MicroDuck",
+    env_cfg=make_microduck_ball_dribble_env_cfg(),
+    play_env_cfg=make_microduck_ball_dribble_env_cfg(play=True),
+    rl_cfg=MicroduckBallDribbleRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# BallSlalom — dribble the same ball around three ordered physical markers.
+register_mjlab_task(
+    task_id="Mjlab-BallSlalom-Flat-MicroDuck",
+    env_cfg=make_microduck_ball_slalom_env_cfg(),
+    play_env_cfg=make_microduck_ball_slalom_env_cfg(play=True),
+    rl_cfg=MicroduckBallSlalomRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 

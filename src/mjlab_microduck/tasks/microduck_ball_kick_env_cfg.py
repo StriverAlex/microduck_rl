@@ -1,4 +1,4 @@
-"""Microduck BallKick task — kick a ball forward with one foot (KICK_FOOT flag).
+"""Microduck BallKick tasks for fixed-foot strikes and continuous dual-foot taps.
 
 Episodic policy: the robot starts STANDING (HOME pose + noise) with a 70mm /
 15g ball sitting just in front of its kicking foot (KICK_FOOT below — train a
@@ -8,11 +8,13 @@ keeping balance and staying robust to external pushes, then settle back into
 a clean stand.
 
 Key design decisions:
-  - The policy is BLIND to the ball (no ball obs in the actor): the real robot
-    has no ball sensing — the operator aims the robot at the ball. Robustness
-    to placement error comes from ±2cm ball-position DR at reset instead. The
-    CRITIC does see ball pos/vel (asymmetric actor-critic) so the value
-    function can anticipate the kick payoff.
+  - The fixed-foot policy is BLIND to the ball: the real robot has no ball
+    sensing, so the operator aims it and placement error is randomized.
+  - The continuous dual-foot policy follows one physical ball for the whole
+    episode. It keeps the 61D actor contract by encoding longitudinal error,
+    selected foot and lateral error in the existing 3D twist command slot.
+    Supplying those three values at deployment therefore requires ball sensing.
+  - The CRITIC sees full ball position and velocity in both variants.
   - No phase command: the kick reward is available from t=0 and an earlier
     kick collects more ball-rolling reward, so the policy kicks immediately.
     At deployment: hard ONNX swap to this policy (à la jump/ground-pick), it
@@ -72,6 +74,7 @@ IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0
 # ── Task constants ────────────────────────────────────────────────────────────
 # Long enough for kick + several seconds of ball-rolling reward + settle-back.
 EPISODE_LENGTH_S = 5.0
+DUAL_EPISODE_LENGTH_S = 8.0
 
 # 70mm-diameter / 15g ball (see ball.xml).
 BALL_RADIUS = 0.035
@@ -94,6 +97,19 @@ BALL_POS_NOISE_XY = 0.015
 # the capped term) — if you change the target, rescale the weights with it.
 BALL_TARGET_SPEED = 1.0
 
+# Continuous dual-foot dribbling uses gentle taps that the 0.4m/s walking policy
+# can follow. The existing one-shot task keeps its 1.0m/s target unchanged.
+DUAL_BALL_TARGET_SPEED = 0.30
+DUAL_COMMAND_TARGET_DISTANCE = 0.12
+DUAL_COMMAND_LONGITUDINAL_SCALE = 0.30
+DUAL_COMMAND_LATERAL_SCALE = 0.15
+DUAL_REWARD_LONGITUDINAL_STD = 0.25
+DUAL_REWARD_LATERAL_STD = 0.15
+DUAL_CONTACT_CLEAR_STEPS = 2
+DUAL_MIN_SPEED_GAIN = 0.05
+DUAL_SUCCESS_KICKS = 3
+DUAL_SUCCESS_DISTANCE = 0.50
+
 # Trunk standing height (measured natural equilibrium at HOME — see standup env).
 STAND_Z = 0.115
 
@@ -106,6 +122,7 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers import (
     CurriculumTermCfg,
     EventTermCfg,
+    MetricsTermCfg,
     ObservationTermCfg,
     RewardTermCfg,
     TerminationTermCfg,
@@ -129,11 +146,11 @@ from mjlab_microduck.tasks.microduck_velocity_env_cfg import HEAD_BODY_NAMES
 from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg, SYMMETRY_CFG
 
 
-def make_microduck_ball_kick_env_cfg(
+def _make_microduck_ball_kick_base_env_cfg(
     play: bool = False,
     kick_foot: str | None = None,
 ) -> ManagerBasedRlEnvCfg:
-    """Create the Microduck BallKick environment configuration.
+    """Create the shared single/dual BallKick configuration baseline.
 
     ``kick_foot`` overrides the module-level KICK_FOOT flag (used by tests);
     normal training just sets the flag at the top of this file.
@@ -309,7 +326,7 @@ def make_microduck_ball_kick_env_cfg(
         params={"sensor_name": self_collision_cfg.name},
     )
 
-    # ── Observations (unified 61D actor layout, ball-blind) ───────────────────
+    # ── Observations (unified 61D actor layout) ───────────────────────────────
     del cfg.observations["actor"].terms["base_lin_vel"]
 
     cfg.observations["critic"].terms["base_lin_vel"] = ObservationTermCfg(
@@ -385,9 +402,8 @@ def make_microduck_ball_kick_env_cfg(
             func=microduck_mdp.zero_command_padding, params={"dim": 6},
         )
 
-    # CRITIC-ONLY ball state (asymmetric actor-critic): the actor stays blind
-    # to the ball (no ball sensing on the real robot), the critic uses it to
-    # predict the kick payoff.
+    # Full ball state remains critic-only. The dual task exposes only normalized
+    # planar guidance through the existing twist command slot.
     cfg.observations["critic"].terms["ball_position"] = ObservationTermCfg(
         func=microduck_mdp.ball_pos_in_base, params={"asset_name": "ball"},
     )
@@ -619,6 +635,262 @@ def make_microduck_ball_kick_env_cfg(
     return cfg
 
 
+def make_microduck_ball_kick_env_cfg(
+    play: bool = False,
+    kick_foot: str | None = None,
+) -> ManagerBasedRlEnvCfg:
+    """Create the original fixed-foot Microduck BallKick environment."""
+    return _make_microduck_ball_kick_base_env_cfg(play, kick_foot)
+
+
+def make_microduck_ball_kick_dual_env_cfg(
+    play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+    """Create continuous same-ball dribbling with per-contact foot selection."""
+    cfg = _make_microduck_ball_kick_base_env_cfg(play, kick_foot="right")
+    cfg.episode_length_s = DUAL_EPISODE_LENGTH_S
+
+    feet_ball_contact_cfg = ContactSensorCfg(
+        name="feet_ball_contact",
+        primary=ContactMatch(
+            mode="geom",
+            pattern=(r"^left_foot_collision$", r"^right_foot_collision$"),
+            entity="robot",
+        ),
+        secondary=ContactMatch(mode="body", pattern=r"^ball$", entity="ball"),
+        fields=("force",),
+        reduce="netforce",
+        num_slots=1,
+        history_length=cfg.decimation,
+    )
+    nonfoot_ball_contact_cfg = ContactSensorCfg(
+        name="nonfoot_ball_contact",
+        primary=ContactMatch(
+            mode="body",
+            pattern=r".+",
+            entity="robot",
+            exclude=("ankle_left", "ankle_right"),
+        ),
+        secondary=ContactMatch(mode="body", pattern=r"^ball$", entity="ball"),
+        fields=("force",),
+        reduce="netforce",
+        num_slots=1,
+        history_length=cfg.decimation,
+    )
+    cfg.scene.sensors = tuple(
+        sensor
+        for sensor in cfg.scene.sensors
+        if sensor.name != "support_foot_ground_contact"
+    ) + (feet_ball_contact_cfg, nonfoot_ball_contact_cfg)
+
+    cfg.commands["twist"] = microduck_mdp.BallKickSideCommandCfg(
+        resampling_time_range=(
+            DUAL_EPISODE_LENGTH_S * 2,
+            DUAL_EPISODE_LENGTH_S * 2,
+        ),
+        debug_vis=False,
+        selection_margin=0.010,
+        target_distance=DUAL_COMMAND_TARGET_DISTANCE,
+        longitudinal_scale=DUAL_COMMAND_LONGITUDINAL_SCALE,
+        lateral_scale=DUAL_COMMAND_LATERAL_SCALE,
+    )
+
+    cfg.rewards["ball_forward_velocity"] = RewardTermCfg(
+        func=microduck_mdp.continuous_ball_dribble,
+        weight=4.0,
+        params={
+            "command_name": "twist",
+            "feet_sensor_name": feet_ball_contact_cfg.name,
+            "nonfoot_sensor_name": nonfoot_ball_contact_cfg.name,
+            "asset_name": "ball",
+            "max_speed": DUAL_BALL_TARGET_SPEED,
+            "target_distance": DUAL_COMMAND_TARGET_DISTANCE,
+            "longitudinal_std": DUAL_REWARD_LONGITUDINAL_STD,
+            "lateral_std": DUAL_REWARD_LATERAL_STD,
+            "clear_steps": DUAL_CONTACT_CLEAR_STEPS,
+            "min_speed_gain": DUAL_MIN_SPEED_GAIN,
+        },
+    )
+    cfg.rewards["ball_speed_overshoot"].params[
+        "target_speed"
+    ] = DUAL_BALL_TARGET_SPEED
+    cfg.rewards["support_foot_grounded"] = RewardTermCfg(
+        func=microduck_mdp.selected_support_foot_grounded_reward,
+        weight=1.0,
+        params={
+            "sensor_name": "feet_ground_contact",
+            "command_name": "twist",
+        },
+    )
+    cfg.rewards["invalid_contact"] = RewardTermCfg(
+        func=microduck_mdp.invalid_ball_contact_cost,
+        weight=-2.0,
+        params={"reward_name": "ball_forward_velocity"},
+    )
+    cfg.rewards["effective_kick"] = RewardTermCfg(
+        func=microduck_mdp.effective_ball_kick_reward,
+        weight=25.0,
+        params={"reward_name": "ball_forward_velocity"},
+    )
+    cfg.rewards["pose_stand_legs"].weight = 0.5
+    cfg.rewards["action_rate_l2"].weight = -0.05
+
+    cfg.terminations["ball_lost"] = TerminationTermCfg(
+        func=microduck_mdp.ball_is_lost,
+        time_out=False,
+        params={
+            "asset_name": "ball",
+            "min_forward": -0.15,
+            "max_distance": 0.75,
+            "max_lateral": 0.40,
+        },
+    )
+
+    cfg.events["reset_ball"] = EventTermCfg(
+        func=microduck_mdp.reset_ball_for_dual_kick,
+        mode="reset",
+        params={
+            "distribution": "continuous" if play else "lobes",
+            "offset_x": BALL_OFFSET_X,
+            "offset_abs_y": BALL_OFFSET_ABS_Y,
+            "noise_x": BALL_POS_NOISE_XY,
+            "noise_y": BALL_POS_NOISE_XY,
+            "x_range": (0.075, 0.105),
+            "y_range": (-0.070, 0.070),
+            "ball_radius": BALL_RADIUS,
+            "asset_name": "ball",
+        },
+    )
+    if play:
+        # Keep eight nearby worlds visible in one tracked-camera replay.
+        cfg.scene.env_spacing = 0.40
+        cfg.viewer.distance = 2.5
+        cfg.viewer.elevation = -35.0
+        cfg.viewer.azimuth = 120.0
+        cfg.viewer.max_extra_envs = 7
+        cfg.events.pop("push_robot")
+        cfg.curriculum.pop("push_magnitude")
+    else:
+        cfg.curriculum["ball_position"] = CurriculumTermCfg(
+            func=microduck_mdp.event_param_curriculum,
+            params={
+                "event_name": "reset_ball",
+                "param_stages": [
+                    {
+                        "step": 0,
+                        "params": {
+                            "distribution": "lobes",
+                            "noise_x": 0.015,
+                            "noise_y": 0.015,
+                        },
+                    },
+                    {
+                        "step": 2000 * 24,
+                        "params": {
+                            "distribution": "lobes",
+                            "noise_x": 0.015,
+                            "noise_y": 0.028,
+                        },
+                    },
+                    {
+                        "step": 3000 * 24,
+                        "params": {"distribution": "continuous"},
+                    },
+                ],
+            },
+        )
+        cfg.curriculum["action_rate_weight"] = CurriculumTermCfg(
+            func=microduck_mdp.reward_weight,
+            params={
+                "reward_name": "action_rate_l2",
+                "weight_stages": [
+                    {"step": 0, "weight": -0.05},
+                    {"step": 1500 * 24, "weight": -0.1},
+                    {"step": 2000 * 24, "weight": -0.2},
+                    {"step": 2500 * 24, "weight": -0.4},
+                    {"step": 3000 * 24, "weight": -0.6},
+                ],
+            },
+        )
+        cfg.curriculum["push_magnitude"].params["push_stages"] = [
+            {
+                "step": 0,
+                "velocity_range": {"x": (0.0, 0.0), "y": (0.0, 0.0)},
+            },
+            {
+                "step": 2000 * 24,
+                "velocity_range": {"x": (-0.08, 0.08), "y": (-0.08, 0.08)},
+            },
+            {
+                "step": 3000 * 24,
+                "velocity_range": {
+                    "x": VELOCITY_PUSH_RANGE,
+                    "y": VELOCITY_PUSH_RANGE,
+                },
+            },
+        ]
+
+    last_metric = {"reduce": "last"}
+    cfg.metrics.update(
+        {
+            "selected_left": MetricsTermCfg(
+                func=microduck_mdp.ball_kick_selected_left,
+                params={"command_name": "twist"},
+                **last_metric,
+            ),
+            "selected_right": MetricsTermCfg(
+                func=microduck_mdp.ball_kick_selected_right,
+                params={"command_name": "twist"},
+                **last_metric,
+            ),
+            "valid_kick_count": MetricsTermCfg(
+                func=microduck_mdp.ball_dribble_valid_kick_count, **last_metric
+            ),
+            "valid_kick_left_count": MetricsTermCfg(
+                func=microduck_mdp.ball_dribble_left_kick_count, **last_metric
+            ),
+            "valid_kick_right_count": MetricsTermCfg(
+                func=microduck_mdp.ball_dribble_right_kick_count, **last_metric
+            ),
+            "wrong_foot_contact_count": MetricsTermCfg(
+                func=microduck_mdp.ball_dribble_wrong_foot_count, **last_metric
+            ),
+            "nonfoot_contact_count": MetricsTermCfg(
+                func=microduck_mdp.ball_dribble_nonfoot_count, **last_metric
+            ),
+            "contact_tie_count": MetricsTermCfg(
+                func=microduck_mdp.ball_dribble_tie_count, **last_metric
+            ),
+            "ball_forward_distance": MetricsTermCfg(
+                func=microduck_mdp.ball_dribble_forward_distance, **last_metric
+            ),
+            "robot_ball_distance": MetricsTermCfg(
+                func=microduck_mdp.ball_dribble_robot_ball_distance,
+                params={"asset_name": "ball"},
+                **last_metric,
+            ),
+            "fell_over": MetricsTermCfg(
+                func=microduck_mdp.ball_kick_fell_over, **last_metric
+            ),
+            "ball_lost": MetricsTermCfg(
+                func=microduck_mdp.ball_kick_fell_over,
+                params={"termination_name": "ball_lost"},
+                **last_metric,
+            ),
+            "continuous_success": MetricsTermCfg(
+                func=microduck_mdp.ball_dribble_success,
+                params={
+                    "reward_name": "ball_forward_velocity",
+                    "min_kicks": DUAL_SUCCESS_KICKS,
+                    "min_distance": DUAL_SUCCESS_DISTANCE,
+                },
+                **last_metric,
+            ),
+        }
+    )
+    return cfg
+
+
 # ── RL runner config ──────────────────────────────────────────────────────────
 
 MicroduckBallKickRlCfg = RslRlOnPolicyRunnerCfg(
@@ -659,3 +931,8 @@ MicroduckBallKickRlCfg = RslRlOnPolicyRunnerCfg(
     num_steps_per_env=24,
     max_iterations=10_000,
 )
+
+MicroduckBallKickDualRlCfg = deepcopy(MicroduckBallKickRlCfg)
+MicroduckBallKickDualRlCfg.algorithm.symmetry_cfg = deepcopy(SYMMETRY_CFG)
+MicroduckBallKickDualRlCfg.experiment_name = "ball_kick_dual_continuous"
+MicroduckBallKickDualRlCfg.run_name = "ball_kick_dual_continuous"

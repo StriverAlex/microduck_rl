@@ -15,7 +15,7 @@ from mjlab.entity import Entity
 from mjlab.tasks.velocity.mdp.velocity_command import UniformVelocityCommand, UniformVelocityCommandCfg
 from mjlab.tasks.velocity.mdp import observations as _velocity_obs
 from mjlab.managers.command_manager import CommandTerm
-from mjlab.managers import CommandTermCfg
+from mjlab.managers import CommandTermCfg, RewardTermCfg
 from mjlab.managers.event_manager import requires_model_fields
 from mjlab.utils.lab_api.math import matrix_from_quat, wrap_to_pi, quat_apply, quat_from_angle_axis
 from rsl_rl.algorithms.ppo import PPO as _PPO
@@ -5690,8 +5690,498 @@ def randomize_dof_field_scaled(
 
 
 # =============================================================================
-# BallKick task — ball reset event, kick rewards, critic-only ball observations
+# BallKick tasks — ball reset, guidance, contact state, rewards and observations
 # =============================================================================
+
+
+class BallKickSideCommand(CommandTerm):
+    """Expose ball-relative geometry and select one foot for each kick attempt."""
+
+    cfg: "BallKickSideCommandCfg"
+
+    def __init__(self, cfg: "BallKickSideCommandCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        if cfg.selection_margin < 0.0:
+            raise ValueError("selection_margin must be non-negative")
+        if cfg.target_distance < 0.0:
+            raise ValueError("target_distance must be non-negative")
+        if cfg.longitudinal_scale <= 0.0 or cfg.lateral_scale <= 0.0:
+            raise ValueError("ball-relative command scales must be positive")
+        self._robot: Entity = env.scene[cfg.robot_asset_name]
+        self._ball: Entity = env.scene[cfg.ball_asset_name]
+        site_ids, site_names = self._robot.find_sites(
+            cfg.foot_site_names, preserve_order=True
+        )
+        if tuple(site_names) != cfg.foot_site_names:
+            raise ValueError(
+                f"Expected foot sites {cfg.foot_site_names}, resolved {tuple(site_names)}"
+            )
+        self._foot_site_ids = torch.tensor(site_ids, device=env.device, dtype=torch.long)
+        self._command = torch.zeros(env.num_envs, 3, device=env.device)
+        self._pending = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self._command
+
+    def _update_metrics(self) -> None:
+        pass
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        self._pending[env_ids] = True
+
+    def request_reselection(self, env_mask: torch.Tensor) -> None:
+        """Select the closer foot where the previous contact has fully cleared."""
+        self._pending |= env_mask
+
+    def _update_command(self) -> None:
+        rel_w = self._ball.data.root_link_pos_w - self._robot.data.root_link_pos_w
+        rot_wb = matrix_from_quat(self._robot.data.root_link_quat_w)
+        rel_b = torch.bmm(rot_wb.transpose(1, 2), rel_w.unsqueeze(-1)).squeeze(-1)
+        self._command[:, 0] = (
+            (rel_b[:, 0] - self.cfg.target_distance)
+            / self.cfg.longitudinal_scale
+        ).clamp(-1.0, 1.0)
+        self._command[:, 2] = (
+            rel_b[:, 1] / self.cfg.lateral_scale
+        ).clamp(-1.0, 1.0)
+
+        env_ids = self._pending.nonzero().flatten()
+        if len(env_ids) == 0:
+            return
+        foot_xy = self._robot.data.site_pos_w[
+            env_ids[:, None], self._foot_site_ids[None, :], :2
+        ]
+        ball_xy = self._ball.data.root_link_pos_w[env_ids, :2]
+        distances = torch.linalg.vector_norm(foot_xy - ball_xy[:, None, :], dim=-1)
+        selected_left = distances[:, 0] + self.cfg.selection_margin < distances[:, 1]
+        self._command[env_ids, 1] = torch.where(selected_left, 1.0, -1.0)
+        self._pending[env_ids] = False
+
+
+@_dataclass(kw_only=True)
+class BallKickSideCommandCfg(CommandTermCfg):
+    """Configuration for same-ball continuous kick guidance."""
+
+    class_type: type = BallKickSideCommand
+    robot_asset_name: str = "robot"
+    ball_asset_name: str = "ball"
+    foot_site_names: tuple[str, str] = ("left_foot", "right_foot")
+    selection_margin: float = 0.010
+    target_distance: float = 0.12
+    longitudinal_scale: float = 0.30
+    lateral_scale: float = 0.15
+
+    def build(self, env: ManagerBasedRlEnv) -> BallKickSideCommand:
+        return BallKickSideCommand(self, env)
+
+
+class BallTargetCommand(CommandTerm):
+    """Expose the live ball-to-target vector in the unified body command slot."""
+
+    cfg: "BallTargetCommandCfg"
+
+    def __init__(self, cfg: "BallTargetCommandCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        if len(cfg.ranges) != 2:
+            raise ValueError("BallTargetCommand ranges must contain angle and distance")
+        angle_range, distance_range = cfg.ranges
+        if angle_range[0] > angle_range[1]:
+            raise ValueError("target angle range must be ordered")
+        if angle_range[0] < -math.pi or angle_range[1] > math.pi:
+            raise ValueError("target angle range must stay within [-pi, pi]")
+        if distance_range[0] <= 0.0 or distance_range[0] > distance_range[1]:
+            raise ValueError("target distance range must be ordered and positive")
+        if cfg.distance_scale <= 0.0:
+            raise ValueError("distance_scale must be positive")
+        if cfg.goal_radius <= 0.0:
+            raise ValueError("goal_radius must be positive")
+
+        self._robot: Entity = env.scene[cfg.robot_asset_name]
+        self._ball: Entity = env.scene[cfg.ball_asset_name]
+        self._command = torch.zeros(env.num_envs, 6, device=env.device)
+        self._target_pos_w = torch.zeros(env.num_envs, 2, device=env.device)
+        self._start_ball_pos_w = torch.zeros(env.num_envs, 2, device=env.device)
+        self._initial_direction_w = torch.zeros(env.num_envs, 2, device=env.device)
+        self._direction_w = torch.zeros(env.num_envs, 2, device=env.device)
+        self._direction_w[:, 0] = 1.0
+        self._distance = torch.full(
+            (env.num_envs,), torch.inf, device=env.device
+        )
+        self._sample_angle = torch.zeros(env.num_envs, device=env.device)
+        self._sample_distance = torch.zeros(env.num_envs, device=env.device)
+        self._target_epoch = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.long
+        )
+        self._pending = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.bool
+        )
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self._command
+
+    @property
+    def target_pos_w(self) -> torch.Tensor:
+        return self._target_pos_w
+
+    @property
+    def direction_w(self) -> torch.Tensor:
+        return self._direction_w
+
+    @property
+    def distance(self) -> torch.Tensor:
+        return self._distance
+
+    @property
+    def initial_distance(self) -> torch.Tensor:
+        return self._sample_distance
+
+    @property
+    def sample_angle(self) -> torch.Tensor:
+        return self._sample_angle
+
+    @property
+    def target_epoch(self) -> torch.Tensor:
+        return self._target_epoch
+
+    @property
+    def cross_track_error(self) -> torch.Tensor:
+        displacement = self._ball.data.root_link_pos_w[:, :2] - self._start_ball_pos_w
+        return torch.abs(
+            displacement[:, 0] * self._initial_direction_w[:, 1]
+            - displacement[:, 1] * self._initial_direction_w[:, 0]
+        )
+
+    def _update_metrics(self) -> None:
+        pass
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        if len(env_ids) == 0:
+            return
+        angle_range, distance_range = self.cfg.ranges
+        self._sample_angle[env_ids] = torch.empty(
+            len(env_ids), device=self.device
+        ).uniform_(*angle_range)
+        self._sample_distance[env_ids] = torch.empty(
+            len(env_ids), device=self.device
+        ).uniform_(*distance_range)
+        self._pending[env_ids] = True
+
+    def _update_command(self) -> None:
+        env_ids = self._pending.nonzero().flatten()
+        if len(env_ids) > 0:
+            quat = self._robot.data.root_link_quat_w[env_ids]
+            qw, qx, qy, qz = quat.unbind(dim=1)
+            yaw = torch.atan2(
+                2.0 * (qw * qz + qx * qy),
+                1.0 - 2.0 * (qy * qy + qz * qz),
+            )
+            heading = yaw + self._sample_angle[env_ids]
+            direction = torch.stack((torch.cos(heading), torch.sin(heading)), dim=1)
+            ball_xy = self._ball.data.root_link_pos_w[env_ids, :2]
+            self._target_pos_w[env_ids] = (
+                ball_xy + self._sample_distance[env_ids, None] * direction
+            )
+            self._start_ball_pos_w[env_ids] = ball_xy
+            self._initial_direction_w[env_ids] = direction
+            self._pending[env_ids] = False
+
+        to_target_w = self._target_pos_w - self._ball.data.root_link_pos_w[:, :2]
+        self._distance = torch.linalg.vector_norm(to_target_w, dim=1)
+        self._direction_w = to_target_w / self._distance.clamp_min(1.0e-6)[:, None]
+
+        direction_w_3d = torch.zeros(
+            self.num_envs, 3, device=self.device, dtype=to_target_w.dtype
+        )
+        direction_w_3d[:, :2] = self._direction_w
+        rot_wb = matrix_from_quat(self._robot.data.root_link_quat_w)
+        direction_b = torch.bmm(
+            rot_wb.transpose(1, 2), direction_w_3d.unsqueeze(-1)
+        ).squeeze(-1)
+        self._command[:, :2] = direction_b[:, :2]
+        self._command[:, 2] = (
+            self._distance / self.cfg.distance_scale
+        ).clamp(0.0, 1.0)
+
+
+@_dataclass(kw_only=True)
+class BallTargetCommandCfg(CommandTermCfg):
+    """Target angle and distance sampled relative to the robot heading at reset."""
+
+    class_type: type = BallTargetCommand
+    robot_asset_name: str = "robot"
+    ball_asset_name: str = "ball"
+    ranges: tuple[tuple[float, float], tuple[float, float]] = (
+        (-math.pi / 2.0, math.pi / 2.0),
+        (1.0, 1.3),
+    )
+    distance_scale: float = 2.0
+    goal_radius: float = 0.15
+
+    def build(self, env: ManagerBasedRlEnv) -> BallTargetCommand:
+        return BallTargetCommand(self, env)
+
+
+class BallSlalomCommand(BallTargetCommand):
+    """Guide the ball through alternating waypoints around a fixed cone line."""
+
+    cfg: "BallSlalomCommandCfg"
+
+    def __init__(self, cfg: "BallSlalomCommandCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        if not cfg.cone_x or any(x <= 0.0 for x in cfg.cone_x):
+            raise ValueError("cone_x must contain positive positions")
+        if any(b <= a for a, b in zip(cfg.cone_x, cfg.cone_x[1:])):
+            raise ValueError("cone_x positions must be strictly increasing")
+        if cfg.lateral_offset < 0.0:
+            raise ValueError("lateral_offset must be non-negative")
+        if cfg.waypoint_clearance <= 0.0:
+            raise ValueError("waypoint_clearance must be positive")
+        if cfg.ball_position_scale <= 0.0:
+            raise ValueError("ball_position_scale must be positive")
+        if cfg.preview_distance <= cfg.goal_radius:
+            raise ValueError("preview_distance must exceed goal_radius")
+
+        self._course: Entity = env.scene[cfg.course_asset_name]
+        if not self._course.is_fixed_base or not self._course.is_mocap:
+            raise TypeError("course_asset_name must resolve to a fixed mocap Entity")
+        self._waypoint_pos_w = torch.zeros(
+            env.num_envs, len(cfg.cone_x), 2, device=env.device
+        )
+        self._waypoint_index = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.long
+        )
+        self._course_side = torch.ones(env.num_envs, device=env.device)
+        self._completed = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.bool
+        )
+
+    @property
+    def waypoint_index(self) -> torch.Tensor:
+        return self._waypoint_index
+
+    @property
+    def total_waypoints(self) -> torch.Tensor:
+        return torch.full_like(self._waypoint_index, len(self.cfg.cone_x))
+
+    @property
+    def course_side(self) -> torch.Tensor:
+        return self._course_side
+
+    @property
+    def completed(self) -> torch.Tensor:
+        return self._completed
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        if len(env_ids) == 0:
+            return
+        self._course_side[env_ids] = torch.where(
+            torch.rand(len(env_ids), device=self.device) < 0.5,
+            -1.0,
+            1.0,
+        )
+        self._waypoint_index[env_ids] = 0
+        self._completed[env_ids] = False
+        self._pending[env_ids] = True
+
+    def _update_command(self) -> None:
+        initialized = self._pending.clone()
+        env_ids = initialized.nonzero().flatten()
+        if len(env_ids) > 0:
+            quat = self._robot.data.root_link_quat_w[env_ids]
+            qw, qx, qy, qz = quat.unbind(dim=1)
+            yaw = torch.atan2(
+                2.0 * (qw * qz + qx * qy),
+                1.0 - 2.0 * (qy * qy + qz * qz),
+            )
+            cos_y = torch.cos(yaw)
+            sin_y = torch.sin(yaw)
+            ball_xy = self._ball.data.root_link_pos_w[env_ids, :2]
+            self._start_ball_pos_w[env_ids] = ball_xy
+
+            cone_x = torch.tensor(
+                self.cfg.cone_x, device=self.device, dtype=ball_xy.dtype
+            )
+            waypoint_x = cone_x + self.cfg.waypoint_clearance
+            alternating = torch.where(
+                torch.arange(len(self.cfg.cone_x), device=self.device) % 2 == 0,
+                1.0,
+                -1.0,
+            )
+            local_y = (
+                self._course_side[env_ids, None]
+                * alternating[None, :]
+                * self.cfg.lateral_offset
+            )
+            course_origin = ball_xy
+            self._waypoint_pos_w[env_ids, :, 0] = (
+                course_origin[:, 0, None]
+                + cos_y[:, None] * waypoint_x[None, :]
+                - sin_y[:, None] * local_y
+            )
+            self._waypoint_pos_w[env_ids, :, 1] = (
+                course_origin[:, 1, None]
+                + sin_y[:, None] * waypoint_x[None, :]
+                + cos_y[:, None] * local_y
+            )
+            first_target = self._waypoint_pos_w[env_ids, 0]
+            first_direction = first_target - ball_xy
+            self._initial_direction_w[env_ids] = first_direction / torch.linalg.vector_norm(
+                first_direction, dim=1
+            )[:, None]
+
+            local_points = [(0.0, 0.0)] + [
+                (
+                    self.cfg.cone_x[index] + self.cfg.waypoint_clearance,
+                    (1.0 if index % 2 == 0 else -1.0)
+                    * self.cfg.lateral_offset,
+                )
+                for index in range(len(self.cfg.cone_x))
+            ]
+            course_length = sum(
+                math.hypot(
+                    local_points[index][0] - local_points[index - 1][0],
+                    local_points[index][1] - local_points[index - 1][1],
+                )
+                for index in range(1, len(local_points))
+            )
+            self._sample_distance[env_ids] = course_length
+            self._sample_angle[env_ids] = torch.where(
+                self._course_side[env_ids] > 0.0,
+                math.pi / 2.0,
+                -math.pi / 2.0,
+            )
+            self._target_epoch[env_ids] += 1
+
+            course_pose = torch.zeros(len(env_ids), 7, device=self.device)
+            course_pose[:, :2] = course_origin
+            course_pose[:, 2] = self._env.scene.terrain.env_origins[env_ids, 2]
+            course_pose[:, 3] = torch.cos(yaw / 2.0)
+            course_pose[:, 6] = torch.sin(yaw / 2.0)
+            self._course.write_mocap_pose_to_sim(course_pose, env_ids)
+            self._pending[env_ids] = False
+
+        current_target = self._waypoint_pos_w[
+            torch.arange(self.num_envs, device=self.device), self._waypoint_index
+        ]
+        current_distance = torch.linalg.vector_norm(
+            current_target - self._ball.data.root_link_pos_w[:, :2], dim=1
+        )
+        reached = (
+            ~initialized
+            & ~self._completed
+            & (current_distance <= self.cfg.goal_radius)
+        )
+        last_waypoint = self.total_waypoints - 1
+        advance = reached & (self._waypoint_index < last_waypoint)
+        self._waypoint_index += advance.long()
+        self._completed |= reached & ~advance
+        self._target_epoch += reached.long()
+
+        next_target = self._waypoint_pos_w[
+            torch.arange(self.num_envs, device=self.device), self._waypoint_index
+        ]
+        self._target_pos_w = next_target
+        to_target_w = self._target_pos_w - self._ball.data.root_link_pos_w[:, :2]
+        target_distance = torch.linalg.vector_norm(to_target_w, dim=1)
+        self._distance = torch.where(
+            self._completed, torch.zeros_like(target_distance), target_distance
+        )
+        waypoint_ids = torch.arange(self.num_envs, device=self.device)
+        following_index = torch.minimum(
+            self._waypoint_index + 1, self.total_waypoints - 1
+        )
+        following_target = self._waypoint_pos_w[waypoint_ids, following_index]
+        segment_start = torch.where(
+            (self._waypoint_index == 0)[:, None],
+            self._start_ball_pos_w,
+            self._waypoint_pos_w[
+                waypoint_ids, (self._waypoint_index - 1).clamp_min(0)
+            ],
+        )
+        current_segment = next_target - segment_start
+        following_segment = following_target - next_target
+        next_turn = torch.sign(
+            current_segment[:, 0] * following_segment[:, 1]
+            - current_segment[:, 1] * following_segment[:, 0]
+        )
+        has_following = self._waypoint_index < (self.total_waypoints - 1)
+        direction_w = to_target_w / target_distance.clamp_min(1.0e-6)[:, None]
+        following_direction_w = following_segment / torch.linalg.vector_norm(
+            following_segment, dim=1
+        ).clamp_min(1.0e-6)[:, None]
+        preview = 0.5 * (
+            (self.cfg.preview_distance - target_distance)
+            / (self.cfg.preview_distance - self.cfg.goal_radius)
+        ).clamp(0.0, 1.0)
+        preview_direction_w = torch.lerp(
+            direction_w, following_direction_w, preview[:, None]
+        )
+        preview_direction_w /= torch.linalg.vector_norm(
+            preview_direction_w, dim=1
+        ).clamp_min(1.0e-6)[:, None]
+        direction_w = torch.where(
+            has_following[:, None], preview_direction_w, direction_w
+        )
+        self._direction_w = torch.where(
+            self._completed[:, None], torch.zeros_like(direction_w), direction_w
+        )
+
+        direction_w_3d = torch.zeros(
+            self.num_envs, 3, device=self.device, dtype=to_target_w.dtype
+        )
+        direction_w_3d[:, :2] = self._direction_w
+        rot_wb = matrix_from_quat(self._robot.data.root_link_quat_w)
+        direction_b = torch.bmm(
+            rot_wb.transpose(1, 2), direction_w_3d.unsqueeze(-1)
+        ).squeeze(-1)
+        ball_offset_w = (
+            self._ball.data.root_link_pos_w - self._robot.data.root_link_pos_w
+        )
+        ball_offset_b = torch.bmm(
+            rot_wb.transpose(1, 2), ball_offset_w.unsqueeze(-1)
+        ).squeeze(-1)
+        active = ~self._completed
+        self._command[:, :2] = direction_b[:, :2]
+        self._command[:, 2] = (
+            self._distance / self.cfg.distance_scale
+        ).clamp(0.0, 1.0)
+        self._command[:, 3] = torch.where(
+            active,
+            (ball_offset_b[:, 1] / self.cfg.ball_position_scale).clamp(-1.0, 1.0),
+            0.0,
+        )
+        self._command[:, 4] = torch.where(
+            active,
+            (ball_offset_b[:, 0] / self.cfg.ball_position_scale).clamp(-1.0, 1.0),
+            0.0,
+        )
+        self._command[:, 5] = torch.where(
+            active & has_following, next_turn, 0.0
+        )
+
+
+@_dataclass(kw_only=True)
+class BallSlalomCommandCfg(BallTargetCommandCfg):
+    """Sequential alternating course sampled in the robot heading frame."""
+
+    class_type: type = BallSlalomCommand
+    course_asset_name: str = "slalom_course"
+    cone_x: tuple[float, ...] = (0.35, 0.70, 1.05)
+    lateral_offset: float = 0.12
+    waypoint_clearance: float = 0.12
+    ball_position_scale: float = 0.30
+    preview_distance: float = 0.25
+    ranges: tuple[tuple[float, float], tuple[float, float]] = (
+        (0.0, 0.0),
+        (1.0, 1.0),
+    )
+    distance_scale: float = 1.0
+    goal_radius: float = 0.08
+
+    def build(self, env: ManagerBasedRlEnv) -> BallSlalomCommand:
+        return BallSlalomCommand(self, env)
 
 
 def _ball_kick_dir(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -5732,8 +6222,6 @@ def reset_ball_in_front_of_foot(
         return
     env_ids = env_ids.to(env.device)
     robot: Entity = env.scene["robot"]
-    ball: Entity = env.scene[asset_name]
-
     root = env.sim.data.qpos[env_ids][:, robot.indexing.free_joint_q_adr]
     qw, qx, qy, qz = root[:, 3], root[:, 4], root[:, 5], root[:, 6]
     yaw = torch.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
@@ -5742,6 +6230,63 @@ def reset_ball_in_front_of_foot(
     n = len(env_ids)
     off = torch.tensor(offset, device=env.device, dtype=torch.float).repeat(n, 1)
     off += (torch.rand(n, 2, device=env.device) * 2.0 - 1.0) * noise_xy
+
+    _write_ball_reset(env, env_ids, root, cos_y, sin_y, off, ball_radius, asset_name)
+
+
+def reset_ball_for_dual_kick(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    distribution: str = "lobes",
+    offset_x: float = 0.09,
+    offset_abs_y: float = 0.042,
+    noise_x: float = 0.015,
+    noise_y: float = 0.015,
+    x_range: tuple[float, float] = (0.075, 0.105),
+    y_range: tuple[float, float] = (-0.070, 0.070),
+    ball_radius: float = 0.035,
+    asset_name: str = "ball",
+) -> None:
+    """Place the ball in two foot-centred lobes or the final continuous region."""
+    if env_ids is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device)
+    robot: Entity = env.scene["robot"]
+    root = env.sim.data.qpos[env_ids][:, robot.indexing.free_joint_q_adr]
+    qw, qx, qy, qz = root[:, 3], root[:, 4], root[:, 5], root[:, 6]
+    yaw = torch.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+    cos_y, sin_y = torch.cos(yaw), torch.sin(yaw)
+
+    n = len(env_ids)
+    off = torch.empty(n, 2, device=env.device)
+    if distribution == "lobes":
+        signs = torch.where(torch.rand(n, device=env.device) < 0.5, -1.0, 1.0)
+        off[:, 0] = offset_x + torch.empty(n, device=env.device).uniform_(-noise_x, noise_x)
+        off[:, 1] = signs * offset_abs_y + torch.empty(n, device=env.device).uniform_(
+            -noise_y, noise_y
+        )
+    elif distribution == "continuous":
+        off[:, 0] = torch.empty(n, device=env.device).uniform_(*x_range)
+        off[:, 1] = torch.empty(n, device=env.device).uniform_(*y_range)
+    else:
+        raise ValueError(f"Unknown dual-kick ball distribution: {distribution}")
+
+    _write_ball_reset(env, env_ids, root, cos_y, sin_y, off, ball_radius, asset_name)
+
+
+def _write_ball_reset(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    root: torch.Tensor,
+    cos_y: torch.Tensor,
+    sin_y: torch.Tensor,
+    off: torch.Tensor,
+    ball_radius: float,
+    asset_name: str,
+) -> None:
+    """Write a sampled yaw-frame ball offset and frozen kick direction."""
+    ball: Entity = env.scene[asset_name]
+    n = len(env_ids)
 
     pose = torch.zeros(n, 7, device=env.device)
     pose[:, 0] = root[:, 0] + cos_y * off[:, 0] - sin_y * off[:, 1]
@@ -5756,6 +6301,722 @@ def reset_ball_in_front_of_foot(
     kick_dir = _ball_kick_dir(env)
     kick_dir[env_ids, 0] = cos_y
     kick_dir[env_ids, 1] = sin_y
+
+
+class continuous_ball_dribble:
+    """Reward controlled forward motion while cycling through distinct ball contacts."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        command = env.command_manager.get_term(cfg.params["command_name"])
+        if not isinstance(command, BallKickSideCommand):
+            raise TypeError("continuous_ball_dribble requires a BallKickSideCommand")
+        from mjlab.sensor import ContactSensor
+
+        ball = env.scene[cfg.params["asset_name"]]
+        if not isinstance(ball, Entity):
+            raise TypeError("asset_name must resolve to an Entity")
+        feet_sensor = env.scene[cfg.params["feet_sensor_name"]]
+        nonfoot_sensor = env.scene[cfg.params["nonfoot_sensor_name"]]
+        if not isinstance(feet_sensor, ContactSensor):
+            raise TypeError("feet_sensor_name must resolve to a ContactSensor")
+        if not isinstance(nonfoot_sensor, ContactSensor):
+            raise TypeError("nonfoot_sensor_name must resolve to a ContactSensor")
+        feet_history = feet_sensor.data.force_history
+        nonfoot_history = nonfoot_sensor.data.force_history
+        if (
+            feet_history is None
+            or feet_history.ndim != 4
+            or feet_history.shape[1] != 2
+            or feet_history.shape[2] != env.cfg.decimation
+        ):
+            raise ValueError(
+                "feet-ball contact history must contain two feet and one control step"
+            )
+        if (
+            nonfoot_history is None
+            or nonfoot_history.ndim != 4
+            or nonfoot_history.shape[2] != env.cfg.decimation
+        ):
+            raise ValueError(
+                "non-foot ball contact history must contain one control step"
+            )
+        if cfg.params["clear_steps"] < 1:
+            raise ValueError("clear_steps must be at least one control step")
+        if cfg.params["max_speed"] <= 0.0:
+            raise ValueError("max_speed must be positive")
+        if cfg.params["target_distance"] < 0.0:
+            raise ValueError("target_distance must be non-negative")
+        if (
+            cfg.params["longitudinal_std"] <= 0.0
+            or cfg.params["lateral_std"] <= 0.0
+        ):
+            raise ValueError("ball-proximity standard deviations must be positive")
+        if cfg.params["min_speed_gain"] <= 0.0:
+            raise ValueError("min_speed_gain must be positive")
+
+        self.command = command
+        self.ball = ball
+        self.feet_sensor = feet_sensor
+        self.nonfoot_sensor = nonfoot_sensor
+        self.step_dt = env.step_dt
+
+        self.awaiting_clear = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.bool
+        )
+        self.clear_step_count = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.long
+        )
+        self.possession = torch.zeros_like(self.awaiting_clear)
+        self.attempt_valid = torch.zeros_like(self.awaiting_clear)
+        self.attempt_effective = torch.zeros_like(self.awaiting_clear)
+        self.attempt_left = torch.zeros_like(self.awaiting_clear)
+        self.attempt_start_speed = torch.zeros(env.num_envs, device=env.device)
+        self.previous_forward_speed = torch.zeros(env.num_envs, device=env.device)
+
+        self.invalid_event = torch.zeros_like(self.awaiting_clear)
+        self.wrong_foot_event = torch.zeros_like(self.awaiting_clear)
+        self.nonfoot_event = torch.zeros_like(self.awaiting_clear)
+        self.tie_event = torch.zeros_like(self.awaiting_clear)
+        self.effective_kick_event = torch.zeros_like(self.awaiting_clear)
+
+        self.valid_kick_count = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.long
+        )
+        self.left_kick_count = torch.zeros_like(self.valid_kick_count)
+        self.right_kick_count = torch.zeros_like(self.valid_kick_count)
+        self.wrong_foot_count = torch.zeros_like(self.valid_kick_count)
+        self.nonfoot_count = torch.zeros_like(self.valid_kick_count)
+        self.tie_count = torch.zeros_like(self.valid_kick_count)
+        self.forward_distance = torch.zeros(env.num_envs, device=env.device)
+
+    @staticmethod
+    def _oldest_contact_index(force_history: torch.Tensor) -> torch.Tensor:
+        hit = torch.linalg.vector_norm(force_history, dim=-1) > 0.0
+        history_ids = torch.arange(
+            force_history.shape[-2], device=force_history.device
+        )
+        return torch.where(hit, history_ids, -1).amax(dim=-1)
+
+    def _motion_direction_w(self, env: ManagerBasedRlEnv) -> torch.Tensor:
+        return _ball_kick_dir(env)
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        command_name: str,
+        feet_sensor_name: str,
+        nonfoot_sensor_name: str,
+        asset_name: str,
+        max_speed: float,
+        target_distance: float,
+        longitudinal_std: float,
+        lateral_std: float,
+        clear_steps: int,
+        min_speed_gain: float,
+    ) -> torch.Tensor:
+        del command_name, feet_sensor_name, nonfoot_sensor_name
+        self.invalid_event.zero_()
+        self.wrong_foot_event.zero_()
+        self.nonfoot_event.zero_()
+        self.tie_event.zero_()
+        self.effective_kick_event.zero_()
+
+        feet_history = self.feet_sensor.data.force_history
+        nonfoot_history = self.nonfoot_sensor.data.force_history
+        assert feet_history is not None
+        assert nonfoot_history is not None
+        feet_hit = torch.linalg.vector_norm(feet_history, dim=-1) > 0.0
+        nonfoot_hit = torch.linalg.vector_norm(nonfoot_history, dim=-1) > 0.0
+        contact_now = feet_hit.any(dim=(1, 2)) | nonfoot_hit.any(dim=(1, 2))
+
+        foot_first = self._oldest_contact_index(feet_history)
+        nonfoot_first = self._oldest_contact_index(nonfoot_history).amax(dim=1)
+        selected_left = self.command.command[:, 1] > 0.0
+        selected_first = torch.where(selected_left, foot_first[:, 0], foot_first[:, 1])
+        wrong_first = torch.where(selected_left, foot_first[:, 1], foot_first[:, 0])
+        first_physical = torch.maximum(
+            selected_first, torch.maximum(wrong_first, nonfoot_first)
+        )
+
+        new_resolution = (~self.awaiting_clear) & (first_physical >= 0)
+        valid_contact = (
+            new_resolution
+            & (selected_first == first_physical)
+            & (wrong_first < first_physical)
+            & (nonfoot_first < first_physical)
+        )
+        invalid_contact = new_resolution & ~valid_contact
+        wrong_foot = invalid_contact & (wrong_first == first_physical)
+        nonfoot = invalid_contact & (nonfoot_first == first_physical)
+        first_source_count = (
+            ((selected_first == first_physical) & (first_physical >= 0)).long()
+            + ((wrong_first == first_physical) & (first_physical >= 0)).long()
+            + ((nonfoot_first == first_physical) & (first_physical >= 0)).long()
+        )
+        tied = invalid_contact & (first_source_count > 1)
+
+        vel_xy = self.ball.data.root_link_lin_vel_w[:, :2]
+        forward_speed = torch.nan_to_num(
+            (vel_xy * self._motion_direction_w(env)).sum(dim=1), nan=0.0
+        ).clamp(min=0.0)
+
+        self.invalid_event.copy_(invalid_contact)
+        self.wrong_foot_event.copy_(wrong_foot)
+        self.nonfoot_event.copy_(nonfoot)
+        self.tie_event.copy_(tied)
+        self.wrong_foot_count += wrong_foot.long()
+        self.nonfoot_count += nonfoot.long()
+        self.tie_count += tied.long()
+
+        self.attempt_valid = torch.where(
+            new_resolution, valid_contact, self.attempt_valid
+        )
+        self.attempt_effective = torch.where(
+            new_resolution,
+            torch.zeros_like(self.attempt_effective),
+            self.attempt_effective,
+        )
+        self.attempt_left = torch.where(
+            new_resolution, selected_left, self.attempt_left
+        )
+        self.attempt_start_speed = torch.where(
+            new_resolution, self.previous_forward_speed, self.attempt_start_speed
+        )
+        self.possession = torch.where(new_resolution, valid_contact, self.possession)
+        self.awaiting_clear |= new_resolution
+
+        effective_kick = (
+            self.awaiting_clear
+            & self.attempt_valid
+            & ~self.attempt_effective
+            & ((forward_speed - self.attempt_start_speed) >= min_speed_gain)
+        )
+        self.effective_kick_event.copy_(effective_kick)
+        self.attempt_effective |= effective_kick
+        self.valid_kick_count += effective_kick.long()
+        self.left_kick_count += (effective_kick & self.attempt_left).long()
+        self.right_kick_count += (effective_kick & ~self.attempt_left).long()
+
+        clearing = self.awaiting_clear & ~contact_now
+        self.clear_step_count = torch.where(
+            clearing,
+            self.clear_step_count + 1,
+            torch.zeros_like(self.clear_step_count),
+        )
+        rearmed = self.awaiting_clear & (self.clear_step_count >= clear_steps)
+        self.awaiting_clear[rearmed] = False
+        self.clear_step_count[rearmed] = 0
+        self.attempt_valid[rearmed] = False
+        self.attempt_effective[rearmed] = False
+        self.command.request_reselection(rearmed)
+
+        self.forward_distance += forward_speed * self.step_dt * self.possession.float()
+        self.previous_forward_speed.copy_(forward_speed)
+
+        ball_position = ball_pos_in_base(env, asset_name)
+        proximity = torch.exp(
+            -torch.square((ball_position[:, 0] - target_distance) / longitudinal_std)
+            -torch.square(ball_position[:, 1] / lateral_std)
+        )
+        return (
+            forward_speed.clamp(max=max_speed)
+            * proximity
+            * self.possession.float()
+        )
+
+    def reset(self, env_ids: torch.Tensor | slice | None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        self.awaiting_clear[env_ids] = False
+        self.clear_step_count[env_ids] = 0
+        self.possession[env_ids] = False
+        self.attempt_valid[env_ids] = False
+        self.attempt_effective[env_ids] = False
+        self.attempt_left[env_ids] = False
+        self.attempt_start_speed[env_ids] = 0.0
+        self.previous_forward_speed[env_ids] = 0.0
+        self.invalid_event[env_ids] = False
+        self.wrong_foot_event[env_ids] = False
+        self.nonfoot_event[env_ids] = False
+        self.tie_event[env_ids] = False
+        self.effective_kick_event[env_ids] = False
+        self.valid_kick_count[env_ids] = 0
+        self.left_kick_count[env_ids] = 0
+        self.right_kick_count[env_ids] = 0
+        self.wrong_foot_count[env_ids] = 0
+        self.nonfoot_count[env_ids] = 0
+        self.tie_count[env_ids] = 0
+        self.forward_distance[env_ids] = 0.0
+
+
+class directional_ball_dribble(continuous_ball_dribble):
+    """Reward touch-limited best-so-far progress toward a sampled target."""
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        target_command = env.command_manager.get_term(
+            cfg.params["target_command_name"]
+        )
+        if not isinstance(target_command, BallTargetCommand):
+            raise TypeError(
+                "directional_ball_dribble requires a BallTargetCommand"
+            )
+        if cfg.params["max_control_distance"] <= 0.0:
+            raise ValueError("max_control_distance must be positive")
+        if cfg.params["progress_credit_per_kick"] <= 0.0:
+            raise ValueError("progress_credit_per_kick must be positive")
+        self.target_command = target_command
+        self.best_target_distance = torch.zeros(
+            env.num_envs, device=env.device
+        )
+        self.has_best_target_distance = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.bool
+        )
+        self.remaining_progress_credit = torch.zeros(
+            env.num_envs, device=env.device
+        )
+        self.last_target_epoch = target_command.target_epoch.clone()
+
+    def _motion_direction_w(self, env: ManagerBasedRlEnv) -> torch.Tensor:
+        del env
+        return self.target_command.direction_w
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        command_name: str,
+        target_command_name: str,
+        feet_sensor_name: str,
+        nonfoot_sensor_name: str,
+        asset_name: str,
+        max_speed: float,
+        target_distance: float,
+        longitudinal_std: float,
+        lateral_std: float,
+        clear_steps: int,
+        min_speed_gain: float,
+        max_control_distance: float,
+        progress_credit_per_kick: float,
+    ) -> torch.Tensor:
+        del target_command_name
+        super().__call__(
+            env,
+            command_name=command_name,
+            feet_sensor_name=feet_sensor_name,
+            nonfoot_sensor_name=nonfoot_sensor_name,
+            asset_name=asset_name,
+            max_speed=max_speed,
+            target_distance=target_distance,
+            longitudinal_std=longitudinal_std,
+            lateral_std=lateral_std,
+            clear_steps=clear_steps,
+            min_speed_gain=min_speed_gain,
+        )
+
+        distance = self.target_command.distance
+        epoch_changed = self.last_target_epoch != self.target_command.target_epoch
+        best_distance = torch.minimum(self.best_target_distance, distance)
+        progress_delta = torch.where(
+            self.has_best_target_distance & ~epoch_changed,
+            self.best_target_distance - best_distance,
+            torch.zeros_like(distance),
+        ).clamp(max=max_speed * self.step_dt)
+        self.best_target_distance.copy_(
+            torch.where(
+                self.has_best_target_distance & ~epoch_changed,
+                best_distance,
+                distance,
+            )
+        )
+        self.has_best_target_distance.fill_(True)
+        self.last_target_epoch.copy_(self.target_command.target_epoch)
+        robot_ball_distance = torch.linalg.vector_norm(
+            ball_pos_in_base(env, asset_name)[:, :2], dim=1
+        )
+        controlled = robot_ball_distance <= max_control_distance
+        self.remaining_progress_credit = torch.where(
+            self.effective_kick_event,
+            torch.full_like(
+                self.remaining_progress_credit, progress_credit_per_kick
+            ),
+            self.remaining_progress_credit,
+        )
+        eligible = self.possession & controlled
+        credited_progress = torch.minimum(
+            progress_delta, self.remaining_progress_credit
+        ) * eligible.float()
+        self.remaining_progress_credit -= credited_progress
+        return credited_progress / self.step_dt
+
+    def reset(self, env_ids: torch.Tensor | slice | None) -> None:
+        super().reset(env_ids)
+        if env_ids is None:
+            env_ids = slice(None)
+        self.best_target_distance[env_ids] = 0.0
+        self.has_best_target_distance[env_ids] = False
+        self.remaining_progress_credit[env_ids] = 0.0
+        self.last_target_epoch[env_ids] = self.target_command.target_epoch[env_ids]
+
+def _dual_ball_reward_term(
+    env: ManagerBasedRlEnv, reward_name: str
+) -> continuous_ball_dribble:
+    term = env.reward_manager.get_term_cfg(reward_name).func
+    if not isinstance(term, continuous_ball_dribble):
+        raise TypeError(f"Reward '{reward_name}' is not continuous_ball_dribble")
+    return term
+
+
+def _ball_target_command(
+    env: ManagerBasedRlEnv, command_name: str
+) -> BallTargetCommand:
+    term = env.command_manager.get_term(command_name)
+    if not isinstance(term, BallTargetCommand):
+        raise TypeError(f"Command '{command_name}' is not BallTargetCommand")
+    return term
+
+
+def _ball_slalom_command(
+    env: ManagerBasedRlEnv, command_name: str
+) -> BallSlalomCommand:
+    term = env.command_manager.get_term(command_name)
+    if not isinstance(term, BallSlalomCommand):
+        raise TypeError(f"Command '{command_name}' is not BallSlalomCommand")
+    return term
+
+
+def ball_target_speed_overshoot_cost(
+    env: ManagerBasedRlEnv,
+    target_command_name: str,
+    asset_name: str = "ball",
+    target_speed: float = 0.30,
+) -> torch.Tensor:
+    """Non-negative cost for target-directed ball speed above the cap."""
+    if target_speed <= 0.0:
+        raise ValueError("target_speed must be positive")
+    command = _ball_target_command(env, target_command_name)
+    ball: Entity = env.scene[asset_name]
+    speed = (
+        ball.data.root_link_lin_vel_w[:, :2] * command.direction_w
+    ).sum(dim=1)
+    return (speed - target_speed).clamp(min=0.0)
+
+
+def ball_control_distance_cost(
+    env: ManagerBasedRlEnv,
+    asset_name: str = "ball",
+    control_distance: float = 0.30,
+) -> torch.Tensor:
+    """Non-negative distance beyond the controllable ball radius."""
+    if control_distance <= 0.0:
+        raise ValueError("control_distance must be positive")
+    distance = torch.linalg.vector_norm(
+        ball_pos_in_base(env, asset_name)[:, :2], dim=1
+    )
+    return (distance - control_distance).clamp(min=0.0)
+
+
+def ball_target_reached(
+    env: ManagerBasedRlEnv,
+    command_name: str = "body_pose",
+) -> torch.Tensor:
+    command = _ball_target_command(env, command_name)
+    return command.distance <= command.cfg.goal_radius
+
+
+def ball_target_progress(
+    env: ManagerBasedRlEnv,
+    command_name: str = "body_pose",
+) -> torch.Tensor:
+    command = _ball_target_command(env, command_name)
+    return command.initial_distance - command.distance
+
+
+def ball_target_distance(
+    env: ManagerBasedRlEnv,
+    command_name: str = "body_pose",
+) -> torch.Tensor:
+    return _ball_target_command(env, command_name).distance
+
+
+def ball_target_cross_track_error(
+    env: ManagerBasedRlEnv,
+    command_name: str = "body_pose",
+) -> torch.Tensor:
+    return _ball_target_command(env, command_name).cross_track_error
+
+
+def ball_target_success(
+    env: ManagerBasedRlEnv,
+    command_name: str = "body_pose",
+) -> torch.Tensor:
+    command = _ball_target_command(env, command_name)
+    return (
+        (command.distance <= command.cfg.goal_radius)
+        & ~env.termination_manager.terminated
+    ).float()
+
+
+def ball_target_angle_bin_mass(
+    env: ManagerBasedRlEnv,
+    min_abs_angle: float,
+    max_abs_angle: float,
+    command_name: str = "body_pose",
+) -> torch.Tensor:
+    """Episode mass whose sampled target angle falls in an absolute-angle bin."""
+    if not 0.0 <= min_abs_angle < max_abs_angle <= math.pi:
+        raise ValueError("target angle bin must satisfy 0 <= min < max <= pi")
+    angle = _ball_target_command(env, command_name).sample_angle.abs()
+    return ((angle >= min_abs_angle) & (angle < max_abs_angle)).float()
+
+
+def ball_target_success_angle_bin_mass(
+    env: ManagerBasedRlEnv,
+    min_abs_angle: float,
+    max_abs_angle: float,
+    command_name: str = "body_pose",
+) -> torch.Tensor:
+    """Successful-episode mass in one absolute target-angle bin."""
+    return ball_target_success(env, command_name) * ball_target_angle_bin_mass(
+        env,
+        min_abs_angle=min_abs_angle,
+        max_abs_angle=max_abs_angle,
+        command_name=command_name,
+    )
+
+
+def ball_slalom_reached(
+    env: ManagerBasedRlEnv,
+    command_name: str = "body_pose",
+) -> torch.Tensor:
+    return _ball_slalom_command(env, command_name).completed
+
+
+def ball_slalom_waypoints_completed(
+    env: ManagerBasedRlEnv,
+    command_name: str = "body_pose",
+) -> torch.Tensor:
+    command = _ball_slalom_command(env, command_name)
+    return command.waypoint_index.float() + command.completed.float()
+
+
+def ball_slalom_course_completion(
+    env: ManagerBasedRlEnv,
+    command_name: str = "body_pose",
+) -> torch.Tensor:
+    command = _ball_slalom_command(env, command_name)
+    return ball_slalom_waypoints_completed(
+        env, command_name
+    ) / command.total_waypoints.float()
+
+
+def ball_slalom_success(
+    env: ManagerBasedRlEnv,
+    command_name: str = "body_pose",
+) -> torch.Tensor:
+    command = _ball_slalom_command(env, command_name)
+    return (command.completed & ~env.termination_manager.terminated).float()
+
+
+def ball_slalom_side_mass(
+    env: ManagerBasedRlEnv,
+    side: str,
+    command_name: str = "body_pose",
+) -> torch.Tensor:
+    if side not in ("left", "right"):
+        raise ValueError("side must be 'left' or 'right'")
+    course_side = _ball_slalom_command(env, command_name).course_side
+    return (course_side > 0.0 if side == "left" else course_side < 0.0).float()
+
+
+def ball_slalom_success_side_mass(
+    env: ManagerBasedRlEnv,
+    side: str,
+    command_name: str = "body_pose",
+) -> torch.Tensor:
+    return ball_slalom_success(env, command_name) * ball_slalom_side_mass(
+        env, side=side, command_name=command_name
+    )
+
+
+def slalom_obstacle_contact_cost(
+    env: ManagerBasedRlEnv,
+    ball_sensor_name: str,
+    robot_sensor_name: str,
+) -> torch.Tensor:
+    """Non-negative binary cost for ball or robot contact with a course marker."""
+    from mjlab.sensor import ContactSensor
+
+    ball_sensor = env.scene[ball_sensor_name]
+    robot_sensor = env.scene[robot_sensor_name]
+    if not isinstance(ball_sensor, ContactSensor):
+        raise TypeError("ball_sensor_name must resolve to a ContactSensor")
+    if not isinstance(robot_sensor, ContactSensor):
+        raise TypeError("robot_sensor_name must resolve to a ContactSensor")
+    if ball_sensor.data.found is None or robot_sensor.data.found is None:
+        raise ValueError("slalom contact sensors must expose the found field")
+    ball_contact = (ball_sensor.data.found > 0).any(dim=1)
+    robot_contact = (robot_sensor.data.found > 0).any(dim=1)
+    return (ball_contact | robot_contact).float()
+
+
+def slalom_course_curriculum(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    command_name: str,
+    stages: list[dict],
+) -> torch.Tensor:
+    """Increase path curvature while preserving the complete three-point course."""
+    del env_ids
+    command = _ball_slalom_command(env, command_name)
+    current = stages[0]
+    for stage in stages:
+        if env.common_step_counter >= stage["step"]:
+            current = stage
+    command.cfg.lateral_offset = current["lateral_offset"]
+    command.cfg.goal_radius = current["goal_radius"]
+    return torch.tensor(current["lateral_offset"])
+
+
+def invalid_ball_contact_cost(
+    env: ManagerBasedRlEnv,
+    reward_name: str = "ball_forward_velocity",
+) -> torch.Tensor:
+    """Binary event cost emitted for each invalid kick attempt."""
+    return _dual_ball_reward_term(env, reward_name).invalid_event.float()
+
+
+def effective_ball_kick_reward(
+    env: ManagerBasedRlEnv,
+    reward_name: str = "ball_forward_velocity",
+) -> torch.Tensor:
+    """Binary event reward emitted once for each effective selected-foot kick."""
+    return _dual_ball_reward_term(env, reward_name).effective_kick_event.float()
+
+
+def selected_support_foot_grounded_reward(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+) -> torch.Tensor:
+    """Binary reward for grounding the foot opposite the selected kicking foot."""
+    from mjlab.sensor import ContactSensor
+
+    sensor = env.scene[sensor_name]
+    if not isinstance(sensor, ContactSensor):
+        raise TypeError("sensor_name must resolve to a ContactSensor")
+    found = sensor.data.found
+    if found is None or found.shape[1] != 2:
+        raise ValueError("support reward requires left/right foot contact data")
+    command = env.command_manager.get_command(command_name)
+    selected_left = command[:, 1] > 0.0
+    support_index = torch.where(selected_left, 1, 0).unsqueeze(1)
+    return found.gather(1, support_index).squeeze(1).clamp(0.0, 1.0)
+
+
+def ball_kick_selected_left(
+    env: ManagerBasedRlEnv, command_name: str = "twist"
+) -> torch.Tensor:
+    return (env.command_manager.get_command(command_name)[:, 1] > 0.0).float()
+
+
+def ball_kick_selected_right(
+    env: ManagerBasedRlEnv, command_name: str = "twist"
+) -> torch.Tensor:
+    return (env.command_manager.get_command(command_name)[:, 1] < 0.0).float()
+
+
+def ball_dribble_valid_kick_count(
+    env: ManagerBasedRlEnv,
+    reward_name: str = "ball_forward_velocity",
+) -> torch.Tensor:
+    return _dual_ball_reward_term(env, reward_name).valid_kick_count.float()
+
+
+def ball_dribble_left_kick_count(
+    env: ManagerBasedRlEnv,
+    reward_name: str = "ball_forward_velocity",
+) -> torch.Tensor:
+    return _dual_ball_reward_term(env, reward_name).left_kick_count.float()
+
+
+def ball_dribble_right_kick_count(
+    env: ManagerBasedRlEnv,
+    reward_name: str = "ball_forward_velocity",
+) -> torch.Tensor:
+    return _dual_ball_reward_term(env, reward_name).right_kick_count.float()
+
+
+def ball_dribble_wrong_foot_count(
+    env: ManagerBasedRlEnv,
+    reward_name: str = "ball_forward_velocity",
+) -> torch.Tensor:
+    return _dual_ball_reward_term(env, reward_name).wrong_foot_count.float()
+
+
+def ball_dribble_nonfoot_count(
+    env: ManagerBasedRlEnv,
+    reward_name: str = "ball_forward_velocity",
+) -> torch.Tensor:
+    return _dual_ball_reward_term(env, reward_name).nonfoot_count.float()
+
+
+def ball_dribble_tie_count(
+    env: ManagerBasedRlEnv,
+    reward_name: str = "ball_forward_velocity",
+) -> torch.Tensor:
+    return _dual_ball_reward_term(env, reward_name).tie_count.float()
+
+
+def ball_dribble_forward_distance(
+    env: ManagerBasedRlEnv,
+    reward_name: str = "ball_forward_velocity",
+) -> torch.Tensor:
+    return _dual_ball_reward_term(env, reward_name).forward_distance
+
+
+def ball_dribble_robot_ball_distance(
+    env: ManagerBasedRlEnv,
+    asset_name: str = "ball",
+) -> torch.Tensor:
+    return torch.linalg.vector_norm(ball_pos_in_base(env, asset_name)[:, :2], dim=1)
+
+
+def ball_dribble_success(
+    env: ManagerBasedRlEnv,
+    reward_name: str = "ball_forward_velocity",
+    min_kicks: int = 3,
+    min_distance: float = 0.5,
+) -> torch.Tensor:
+    term = _dual_ball_reward_term(env, reward_name)
+    return (
+        (term.valid_kick_count >= min_kicks)
+        & (term.forward_distance >= min_distance)
+        & ~env.termination_manager.terminated
+    ).float()
+
+
+def ball_kick_fell_over(
+    env: ManagerBasedRlEnv,
+    termination_name: str = "fell_over",
+) -> torch.Tensor:
+    return env.termination_manager.get_term(termination_name).float()
+
+
+def ball_is_lost(
+    env: ManagerBasedRlEnv,
+    asset_name: str = "ball",
+    min_forward: float = -0.15,
+    max_distance: float = 0.75,
+    max_lateral: float = 0.40,
+) -> torch.Tensor:
+    """Terminate when the same ball leaves the robot's recoverable region."""
+    position = ball_pos_in_base(env, asset_name)
+    distance = torch.linalg.vector_norm(position[:, :2], dim=1)
+    return (
+        (position[:, 0] < min_forward)
+        | (distance > max_distance)
+        | (position[:, 1].abs() > max_lateral)
+    )
 
 
 def ball_forward_velocity(
@@ -5828,12 +7089,7 @@ def ball_pos_in_base(
     env: ManagerBasedRlEnv,
     asset_name: str = "ball",
 ) -> torch.Tensor:
-    """Ball position relative to the robot root, in the robot's base frame.
-
-    CRITIC-ONLY observation (asymmetric actor-critic): the deployed policy has
-    no ball sensing, so the actor must stay blind to the ball — the critic can
-    still use it to predict the kick payoff.
-    """
+    """Ball position relative to the robot root, in the robot's base frame."""
     robot: Entity = env.scene["robot"]
     ball: Entity = env.scene[asset_name]
     rel = ball.data.root_link_pos_w - robot.data.root_link_pos_w
@@ -5845,7 +7101,7 @@ def ball_vel_in_base(
     env: ManagerBasedRlEnv,
     asset_name: str = "ball",
 ) -> torch.Tensor:
-    """Ball linear velocity in the robot's base frame. CRITIC-ONLY (see above)."""
+    """Ball linear velocity in the robot's base frame."""
     robot: Entity = env.scene["robot"]
     ball: Entity = env.scene[asset_name]
     rot = matrix_from_quat(robot.data.root_link_quat_w)
