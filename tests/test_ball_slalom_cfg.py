@@ -27,6 +27,7 @@ from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
     SLALOM_LARGE_LATERAL_OFFSET,
     SLALOM_LEARNING_RATE,
     SLALOM_MEDIUM_GOAL_RADIUS,
+    SLALOM_MIN_BALL_FORWARD,
     SLALOM_OBSTACLE_COST_WEIGHT,
     SLALOM_PROGRESS_REWARD_WEIGHT,
     SLALOM_PUSH_RANGE,
@@ -204,6 +205,10 @@ def test_slalom_control_distance_uses_a_nonnegative_cost_with_negative_weight():
         "asset_name": "ball",
         "control_distance": DRIBBLE_CONTROL_RADIUS,
     }
+    assert cfg.terminations["ball_lost"].params["min_forward"] == (
+        SLALOM_MIN_BALL_FORWARD
+    )
+    assert SLALOM_MIN_BALL_FORWARD == -DRIBBLE_CONTROL_RADIUS
 
 
 def test_slalom_termination_and_metrics_use_completed_course_state():

@@ -42,6 +42,7 @@ SLALOM_MEDIUM_GOAL_RADIUS = 0.12
 SLALOM_DISTANCE_SCALE = DRIBBLE_TARGET_DISTANCE_SCALE
 SLALOM_OBSTACLE_COST_WEIGHT = -1.0
 SLALOM_CONTROL_DISTANCE_COST_WEIGHT = -5.0
+SLALOM_MIN_BALL_FORWARD = -DRIBBLE_CONTROL_RADIUS
 SLALOM_INITIAL_TERMINATION_COST_WEIGHT = -300.0
 SLALOM_TERMINATION_COST_WEIGHT = -500.0
 SLALOM_SUCCESS_REWARD_WEIGHT = 100.0
@@ -130,6 +131,7 @@ def make_microduck_ball_slalom_env_cfg(
             "control_distance": DRIBBLE_CONTROL_RADIUS,
         },
     )
+    cfg.terminations["ball_lost"].params["min_forward"] = SLALOM_MIN_BALL_FORWARD
     cfg.rewards["termination"] = RewardTermCfg(
         func=base_mdp.is_terminated,
         weight=(
