@@ -316,7 +316,7 @@ def make_microduck_ball_slalom_env_cfg(
 MicroduckBallSlalomRlCfg = deepcopy(MicroduckBallDribbleRlCfg)
 MicroduckBallSlalomRlCfg.experiment_name = "ball_slalom"
 MicroduckBallSlalomRlCfg.run_name = "ball_slalom"
-MicroduckBallSlalomRlCfg.max_iterations = 7_250
+MicroduckBallSlalomRlCfg.max_iterations = 7_500
 MicroduckBallSlalomRlCfg.algorithm.entropy_coef = SLALOM_ENTROPY_COEF
 MicroduckBallSlalomRlCfg.algorithm.learning_rate = SLALOM_LEARNING_RATE
 MicroduckBallSlalomRlCfg.algorithm.schedule = "fixed"

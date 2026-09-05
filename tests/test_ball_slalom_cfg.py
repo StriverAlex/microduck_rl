@@ -225,7 +225,7 @@ def test_only_base_slalom_task_is_registered():
     assert "Mjlab-BallSlalom-Flat-Backlash-MicroDuck" not in tasks
     assert MicroduckBallSlalomRlCfg.algorithm.symmetry_cfg["use_mirror_loss"] is True
     assert MicroduckBallSlalomRlCfg.experiment_name == "ball_slalom"
-    assert MicroduckBallSlalomRlCfg.max_iterations == 7_250
+    assert MicroduckBallSlalomRlCfg.max_iterations == 7_500
     assert MicroduckBallSlalomRlCfg.algorithm.entropy_coef == SLALOM_ENTROPY_COEF
     assert MicroduckBallSlalomRlCfg.algorithm.learning_rate == SLALOM_LEARNING_RATE
     assert MicroduckBallSlalomRlCfg.algorithm.schedule == "fixed"
