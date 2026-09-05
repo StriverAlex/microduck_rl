@@ -22,6 +22,7 @@ from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
     SLALOM_INITIAL_GOAL_RADIUS,
     SLALOM_INITIAL_LATERAL_OFFSET,
     SLALOM_INITIAL_PROGRESS_REWARD_WEIGHT,
+    SLALOM_INITIAL_TERMINATION_COST_WEIGHT,
     SLALOM_INTERMEDIATE_LATERAL_OFFSET,
     SLALOM_LARGE_LATERAL_OFFSET,
     SLALOM_LEARNING_RATE,
@@ -133,6 +134,15 @@ def test_slalom_command_and_curriculum_reach_the_complete_course():
             {"step": 0, "weight": -0.05},
         ],
     }
+    assert cfg.rewards["termination"].weight == (SLALOM_INITIAL_TERMINATION_COST_WEIGHT)
+    assert cfg.curriculum["slalom_termination_weight"].params == {
+        "reward_name": "termination",
+        "weight_stages": [
+            {"step": 0, "weight": SLALOM_INITIAL_TERMINATION_COST_WEIGHT},
+            {"step": 7000 * 24, "weight": SLALOM_TERMINATION_COST_WEIGHT},
+        ],
+    }
+    assert cfg.rewards["course_success"].weight == SLALOM_SUCCESS_REWARD_WEIGHT
 
 
 def test_slalom_play_uses_three_cones_without_training_curricula_or_pushes():
@@ -143,9 +153,12 @@ def test_slalom_play_uses_three_cones_without_training_curricula_or_pushes():
     assert command.lateral_offset == SLALOM_FINAL_LATERAL_OFFSET
     assert "slalom_course" not in cfg.curriculum
     assert "slalom_progress_weight" not in cfg.curriculum
+    assert "slalom_termination_weight" not in cfg.curriculum
     assert cfg.rewards["ball_target_progress"].weight == (
         DRIBBLE_PROGRESS_REWARD_WEIGHT
     )
+    assert cfg.rewards["termination"].weight == SLALOM_TERMINATION_COST_WEIGHT
+    assert cfg.rewards["course_success"].weight == SLALOM_SUCCESS_REWARD_WEIGHT
     assert "push_robot" not in cfg.events
     assert "push_magnitude" not in cfg.curriculum
 
@@ -166,7 +179,7 @@ def test_slalom_uses_official_failure_termination_cost():
     cost = cfg.rewards["termination"]
 
     assert cost.func is base_mdp.is_terminated
-    assert cost.weight == SLALOM_TERMINATION_COST_WEIGHT
+    assert cost.weight == SLALOM_INITIAL_TERMINATION_COST_WEIGHT
     assert cost.weight < 0.0
 
 
@@ -212,7 +225,7 @@ def test_only_base_slalom_task_is_registered():
     assert "Mjlab-BallSlalom-Flat-Backlash-MicroDuck" not in tasks
     assert MicroduckBallSlalomRlCfg.algorithm.symmetry_cfg["use_mirror_loss"] is True
     assert MicroduckBallSlalomRlCfg.experiment_name == "ball_slalom"
-    assert MicroduckBallSlalomRlCfg.max_iterations == 7_000
+    assert MicroduckBallSlalomRlCfg.max_iterations == 7_250
     assert MicroduckBallSlalomRlCfg.algorithm.entropy_coef == SLALOM_ENTROPY_COEF
     assert MicroduckBallSlalomRlCfg.algorithm.learning_rate == SLALOM_LEARNING_RATE
     assert MicroduckBallSlalomRlCfg.algorithm.schedule == "fixed"

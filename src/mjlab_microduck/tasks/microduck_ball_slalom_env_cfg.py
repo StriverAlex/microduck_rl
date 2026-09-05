@@ -42,7 +42,8 @@ SLALOM_MEDIUM_GOAL_RADIUS = 0.12
 SLALOM_DISTANCE_SCALE = DRIBBLE_TARGET_DISTANCE_SCALE
 SLALOM_OBSTACLE_COST_WEIGHT = -1.0
 SLALOM_CONTROL_DISTANCE_COST_WEIGHT = -5.0
-SLALOM_TERMINATION_COST_WEIGHT = -300.0
+SLALOM_INITIAL_TERMINATION_COST_WEIGHT = -300.0
+SLALOM_TERMINATION_COST_WEIGHT = -500.0
 SLALOM_SUCCESS_REWARD_WEIGHT = 100.0
 SLALOM_INITIAL_PROGRESS_REWARD_WEIGHT = 40.0
 SLALOM_PROGRESS_REWARD_WEIGHT = 24.0
@@ -131,7 +132,11 @@ def make_microduck_ball_slalom_env_cfg(
     )
     cfg.rewards["termination"] = RewardTermCfg(
         func=base_mdp.is_terminated,
-        weight=SLALOM_TERMINATION_COST_WEIGHT,
+        weight=(
+            SLALOM_TERMINATION_COST_WEIGHT
+            if play
+            else SLALOM_INITIAL_TERMINATION_COST_WEIGHT
+        ),
     )
     cfg.rewards["course_success"] = RewardTermCfg(
         func=microduck_mdp.ball_slalom_success,
@@ -288,6 +293,22 @@ def make_microduck_ball_slalom_env_cfg(
                 ],
             },
         )
+        cfg.curriculum["slalom_termination_weight"] = CurriculumTermCfg(
+            func=microduck_mdp.reward_weight,
+            params={
+                "reward_name": "termination",
+                "weight_stages": [
+                    {
+                        "step": 0,
+                        "weight": SLALOM_INITIAL_TERMINATION_COST_WEIGHT,
+                    },
+                    {
+                        "step": 7000 * 24,
+                        "weight": SLALOM_TERMINATION_COST_WEIGHT,
+                    },
+                ],
+            },
+        )
 
     return cfg
 
@@ -295,7 +316,7 @@ def make_microduck_ball_slalom_env_cfg(
 MicroduckBallSlalomRlCfg = deepcopy(MicroduckBallDribbleRlCfg)
 MicroduckBallSlalomRlCfg.experiment_name = "ball_slalom"
 MicroduckBallSlalomRlCfg.run_name = "ball_slalom"
-MicroduckBallSlalomRlCfg.max_iterations = 7_000
+MicroduckBallSlalomRlCfg.max_iterations = 7_250
 MicroduckBallSlalomRlCfg.algorithm.entropy_coef = SLALOM_ENTROPY_COEF
 MicroduckBallSlalomRlCfg.algorithm.learning_rate = SLALOM_LEARNING_RATE
 MicroduckBallSlalomRlCfg.algorithm.schedule = "fixed"
