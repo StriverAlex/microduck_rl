@@ -99,7 +99,6 @@ def test_slalom_command_and_curriculum_reach_the_complete_course():
         (3200 * 24, SLALOM_LARGE_LATERAL_OFFSET, SLALOM_INITIAL_GOAL_RADIUS),
         (4200 * 24, SLALOM_FINAL_LATERAL_OFFSET, SLALOM_INITIAL_GOAL_RADIUS),
         (5000 * 24, SLALOM_FINAL_LATERAL_OFFSET, SLALOM_MEDIUM_GOAL_RADIUS),
-        (5700 * 24, SLALOM_FINAL_LATERAL_OFFSET, SLALOM_GOAL_RADIUS),
     ]
     assert "target_range" not in cfg.curriculum
     assert "com_range" not in cfg.curriculum

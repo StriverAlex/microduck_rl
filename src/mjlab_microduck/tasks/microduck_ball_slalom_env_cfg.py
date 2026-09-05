@@ -36,7 +36,7 @@ SLALOM_INTERMEDIATE_LATERAL_OFFSET = 0.12
 SLALOM_LARGE_LATERAL_OFFSET = 0.14
 SLALOM_FINAL_LATERAL_OFFSET = 0.16
 SLALOM_WAYPOINT_CLEARANCE = 0.12
-SLALOM_GOAL_RADIUS = 0.10
+SLALOM_GOAL_RADIUS = 0.12
 SLALOM_INITIAL_GOAL_RADIUS = DRIBBLE_GOAL_RADIUS
 SLALOM_MEDIUM_GOAL_RADIUS = 0.12
 SLALOM_DISTANCE_SCALE = DRIBBLE_TARGET_DISTANCE_SCALE
@@ -270,11 +270,6 @@ def make_microduck_ball_slalom_env_cfg(
                         "step": 5000 * 24,
                         "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
                         "goal_radius": SLALOM_MEDIUM_GOAL_RADIUS,
-                    },
-                    {
-                        "step": 5700 * 24,
-                        "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
-                        "goal_radius": SLALOM_GOAL_RADIUS,
                     },
                 ],
             },

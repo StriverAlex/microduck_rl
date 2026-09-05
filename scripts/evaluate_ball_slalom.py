@@ -56,6 +56,7 @@ def evaluate_checkpoint(
     episodes: int,
     seed: int,
     device: str,
+    goal_radius: float | None = None,
 ) -> RolloutResult:
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
@@ -63,6 +64,10 @@ def evaluate_checkpoint(
         raise ValueError("episodes must satisfy 0 < episodes <= num_envs")
 
     env_cfg = load_env_cfg(TASK_ID, play=True)
+    if goal_radius is not None:
+        if goal_radius <= 0.0:
+            raise ValueError("goal_radius must be positive")
+        env_cfg.commands["body_pose"].goal_radius = goal_radius
     agent_cfg = load_rl_cfg(TASK_ID)
     env_cfg.scene.num_envs = num_envs
     env_cfg.seed = seed
@@ -249,6 +254,8 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=4096)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--min-success-gain", type=float, default=0.03)
+    parser.add_argument("--min-success-rate", type=float, default=0.0)
+    parser.add_argument("--goal-radius", type=float)
     parser.add_argument("--max-ball-lost-increase", type=float, default=0.0)
     parser.add_argument(
         "--device",
@@ -263,6 +270,7 @@ def main() -> None:
         episodes=args.episodes,
         seed=args.seed,
         device=args.device,
+        goal_radius=args.goal_radius,
     )
     candidate = evaluate_checkpoint(
         args.candidate,
@@ -270,9 +278,11 @@ def main() -> None:
         episodes=args.episodes,
         seed=args.seed,
         device=args.device,
+        goal_radius=args.goal_radius,
     )
     passed = (
-        candidate.success_rate >= baseline.success_rate + args.min_success_gain
+        candidate.success_rate >= args.min_success_rate
+        and candidate.success_rate >= baseline.success_rate + args.min_success_gain
         and candidate.fall_rate <= baseline.fall_rate
         and candidate.ball_lost_rate
         <= baseline.ball_lost_rate + args.max_ball_lost_increase
