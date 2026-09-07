@@ -5,6 +5,9 @@ from types import SimpleNamespace
 
 import torch
 
+from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
+    make_microduck_ball_slalom_env_cfg,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -109,3 +112,60 @@ def test_strict_route_requires_duck_as_well_as_ball_to_complete_course():
     assert tracker.ball_index.item() == 3
     assert tracker.robot_index.item() == 0
     assert not tracker.completed.item()
+
+
+def test_generalization_scenario_rebuilds_the_physical_course_and_contact_matchers():
+    cfg = make_microduck_ball_slalom_env_cfg()
+    scenario = evaluation.SlalomScenario(
+        name="test_five",
+        cone_x=(0.40, 0.80, 1.20, 1.60, 2.00),
+        lateral_offset=0.18,
+        episode_length_s=24.0,
+    )
+
+    evaluation.configure_slalom_scenario(cfg, scenario)
+
+    command = cfg.commands["body_pose"]
+    assert command.cone_x == scenario.cone_x
+    assert command.lateral_offset == scenario.lateral_offset
+    assert cfg.episode_length_s == scenario.episode_length_s
+    assert command.resampling_time_range == (48.0, 48.0)
+    assert cfg.commands["twist"].resampling_time_range == (48.0, 48.0)
+    course = cfg.scene.entities["slalom_course"].build()
+    assert course.geom_names == tuple(f"slalom_cone_{i}" for i in range(1, 6))
+    marker_sensors = {
+        sensor.name: sensor
+        for sensor in cfg.scene.sensors
+        if "marker_contact" in sensor.name
+    }
+    assert marker_sensors["ball_marker_contact"].primary.pattern == (
+        r"^slalom_cone_(?:1|2|3|4|5)$"
+    )
+    assert marker_sensors["robot_marker_contact"].primary.pattern == (
+        r"^slalom_cone_(?:1|2|3|4|5)$"
+    )
+
+
+def test_generalization_battery_isolates_course_geometry_changes():
+    scenarios = evaluation.GENERALIZATION_SCENARIOS
+
+    assert tuple(scenarios) == (
+        "five_standard",
+        "five_tight",
+        "five_wide",
+        "five_irregular",
+    )
+    standard = scenarios["five_standard"]
+    tight = scenarios["five_tight"]
+    wide = scenarios["five_wide"]
+    irregular = scenarios["five_irregular"]
+    assert len(standard.cone_x) == 5
+    assert tight.lateral_offset == standard.lateral_offset
+    assert tight.cone_x[-1] < standard.cone_x[-1]
+    assert wide.cone_x == standard.cone_x
+    assert wide.lateral_offset > standard.lateral_offset
+    irregular_gaps = tuple(
+        round(next_x - current_x, 2)
+        for current_x, next_x in zip(irregular.cone_x, irregular.cone_x[1:])
+    )
+    assert len(set(irregular_gaps)) > 1

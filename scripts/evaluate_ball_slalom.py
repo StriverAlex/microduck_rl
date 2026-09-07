@@ -5,10 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 
+import mujoco
 import torch
-from mjlab.envs import ManagerBasedRlEnv
+from mjlab.entity import EntityCfg
+from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
@@ -22,6 +25,99 @@ from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
 
 TASK_ID = "Mjlab-BallSlalom-Flat-MicroDuck"
 STRICT_ROUTE_LATERAL_MARGIN = SLALOM_ROUTE_LATERAL_MARGIN
+
+
+@dataclass(frozen=True)
+class SlalomScenario:
+    """Physical course geometry used for an evaluation-only rollout."""
+
+    name: str
+    cone_x: tuple[float, ...]
+    lateral_offset: float
+    episode_length_s: float
+
+    def __post_init__(self) -> None:
+        if len(self.cone_x) < 3:
+            raise ValueError("a slalom scenario requires at least three cones")
+        if self.cone_x[0] <= 0.0 or any(
+            next_x <= current_x
+            for current_x, next_x in zip(self.cone_x, self.cone_x[1:])
+        ):
+            raise ValueError("cone_x must contain positive increasing positions")
+        if self.lateral_offset < STRICT_ROUTE_LATERAL_MARGIN:
+            raise ValueError("lateral_offset must satisfy the strict route margin")
+        if self.episode_length_s <= 0.0:
+            raise ValueError("episode_length_s must be positive")
+
+
+GENERALIZATION_SCENARIOS = {
+    "five_standard": SlalomScenario(
+        name="five_standard",
+        cone_x=(0.45, 0.90, 1.35, 1.80, 2.25),
+        lateral_offset=0.16,
+        episode_length_s=25.0,
+    ),
+    "five_tight": SlalomScenario(
+        name="five_tight",
+        cone_x=(0.38, 0.76, 1.14, 1.52, 1.90),
+        lateral_offset=0.16,
+        episode_length_s=25.0,
+    ),
+    "five_wide": SlalomScenario(
+        name="five_wide",
+        cone_x=(0.45, 0.90, 1.35, 1.80, 2.25),
+        lateral_offset=0.20,
+        episode_length_s=25.0,
+    ),
+    "five_irregular": SlalomScenario(
+        name="five_irregular",
+        cone_x=(0.42, 0.91, 1.29, 1.83, 2.22),
+        lateral_offset=0.16,
+        episode_length_s=25.0,
+    ),
+}
+
+
+def _build_slalom_course_spec(cone_x: tuple[float, ...]) -> mujoco.MjSpec:
+    geoms = "\n".join(
+        f'<geom type="cylinder" name="slalom_cone_{index}" '
+        f'pos="{x:.6f} 0 0.05" size="0.025 0.05" '
+        'rgba="0.15 0.45 1 1" friction="0.8 0.005 0.0001"/>'
+        for index, x in enumerate(cone_x, start=1)
+    )
+    return mujoco.MjSpec.from_string(
+        '<mujoco model="microduck_slalom_course_eval">'
+        '<compiler angle="radian" autolimits="true"/>'
+        '<worldbody><body name="slalom_course">'
+        f"{geoms}"
+        "</body></worldbody></mujoco>"
+    )
+
+
+def configure_slalom_scenario(
+    cfg: ManagerBasedRlEnvCfg,
+    scenario: SlalomScenario,
+) -> None:
+    """Replace only the physical course and matching command geometry."""
+    cfg.scene.entities["slalom_course"] = EntityCfg(
+        spec_fn=partial(_build_slalom_course_spec, scenario.cone_x)
+    )
+    command = cfg.commands["body_pose"]
+    command.cone_x = scenario.cone_x
+    command.lateral_offset = scenario.lateral_offset
+    cfg.episode_length_s = scenario.episode_length_s
+    command_duration = (scenario.episode_length_s * 2,) * 2
+    command.resampling_time_range = command_duration
+    cfg.commands["twist"].resampling_time_range = command_duration
+
+    marker_pattern = (
+        r"^slalom_cone_(?:"
+        + "|".join(str(index) for index in range(1, len(scenario.cone_x) + 1))
+        + r")$"
+    )
+    for sensor in cfg.scene.sensors:
+        if sensor.name in ("ball_marker_contact", "robot_marker_contact"):
+            sensor.primary.pattern = marker_pattern
 
 
 class StrictRouteTracker:
@@ -154,9 +250,9 @@ class RolloutResult:
     robot_wrong_side_rate: float
     ball_marker_contact_rate: float
     robot_marker_contact_rate: float
-    obstacle_contact_waypoint_counts: tuple[int, int, int]
-    fall_waypoint_counts: tuple[int, int, int]
-    ball_lost_waypoint_counts: tuple[int, int, int]
+    obstacle_contact_waypoint_counts: tuple[int, ...]
+    fall_waypoint_counts: tuple[int, ...]
+    ball_lost_waypoint_counts: tuple[int, ...]
     ball_lost_backward_count: int
     ball_lost_distance_count: int
     ball_lost_lateral_count: int
@@ -184,6 +280,7 @@ def evaluate_checkpoint(
     seed: int,
     device: str,
     goal_radius: float | None = None,
+    scenario: SlalomScenario | None = None,
 ) -> RolloutResult:
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
@@ -191,7 +288,10 @@ def evaluate_checkpoint(
         raise ValueError("episodes must satisfy 0 < episodes <= num_envs")
 
     env_cfg = load_env_cfg(TASK_ID)
-    env_cfg.commands["body_pose"].lateral_offset = SLALOM_FINAL_LATERAL_OFFSET
+    if scenario is None:
+        env_cfg.commands["body_pose"].lateral_offset = SLALOM_FINAL_LATERAL_OFFSET
+    else:
+        configure_slalom_scenario(env_cfg, scenario)
     env_cfg.commands["body_pose"].goal_radius = SLALOM_GOAL_RADIUS
     env_cfg.curriculum.clear()
     if goal_radius is not None:
@@ -228,9 +328,7 @@ def evaluate_checkpoint(
     obstacle_contact_terminations = torch.zeros(
         num_envs, dtype=torch.bool, device=device
     )
-    invalid_route_terminations = torch.zeros(
-        num_envs, dtype=torch.bool, device=device
-    )
+    invalid_route_terminations = torch.zeros(num_envs, dtype=torch.bool, device=device)
     course_sides = torch.zeros(num_envs, device=device)
     terminal_waypoints = torch.zeros(num_envs, dtype=torch.long, device=device)
     terminal_ball_position = torch.zeros(num_envs, 3, device=device)
@@ -267,11 +365,15 @@ def evaluate_checkpoint(
                 ball = raw_env.scene["ball"]
                 robot = raw_env.scene["robot"]
                 ball_contact = (
-                    raw_env.scene["ball_marker_contact"].data.found > 0
-                ).flatten(start_dim=1).any(dim=1)
+                    (raw_env.scene["ball_marker_contact"].data.found > 0)
+                    .flatten(start_dim=1)
+                    .any(dim=1)
+                )
                 robot_contact = (
-                    raw_env.scene["robot_marker_contact"].data.found > 0
-                ).flatten(start_dim=1).any(dim=1)
+                    (raw_env.scene["robot_marker_contact"].data.found > 0)
+                    .flatten(start_dim=1)
+                    .any(dim=1)
+                )
                 tracker.update(
                     robot.data.root_link_pos_w[:, :2],
                     ball.data.root_link_pos_w[:, :2],
@@ -371,16 +473,20 @@ def evaluate_checkpoint(
         ball_marker_contact_rate=tracker.ball_contact[selected].float().mean().item(),
         robot_marker_contact_rate=tracker.robot_contact[selected].float().mean().item(),
         obstacle_contact_waypoint_counts=tuple(
-            int((selected_obstacle_contacts & (selected_waypoints == index)).sum().item())
-            for index in range(3)
+            int(
+                (selected_obstacle_contacts & (selected_waypoints == index))
+                .sum()
+                .item()
+            )
+            for index in range(len(tracker.cone_x))
         ),
         fall_waypoint_counts=tuple(
             int((selected_falls & (selected_waypoints == index)).sum().item())
-            for index in range(3)
+            for index in range(len(tracker.cone_x))
         ),
         ball_lost_waypoint_counts=tuple(
             int((selected_ball_losses & (selected_waypoints == index)).sum().item())
-            for index in range(3)
+            for index in range(len(tracker.cone_x))
         ),
         ball_lost_backward_count=int(
             (
