@@ -16,6 +16,11 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 import mediapy as media
 import numpy as np
 import torch
+from evaluate_ball_slalom import (
+    GENERALIZATION_SCENARIOS,
+    SlalomScenario,
+    configure_slalom_scenario,
+)
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
@@ -125,6 +130,7 @@ class SelectedRollout:
     frames: list[SimFrame]
     camera: CameraPose
     analysis: dict[str, Any]
+    total_waypoints: int
 
 
 def classify_episode(state: TerminalState) -> str:
@@ -149,15 +155,14 @@ def should_select(
 ) -> bool:
     """Select the earliest requested episodes in each diagnostic category."""
     return (
-        category in TARGET_CATEGORIES
-        and selected_counts[category] < samples_per_category
+        category in selected_counts and selected_counts[category] < samples_per_category
     )
 
 
 def quotas_met(selected_counts: dict[str, int], samples_per_category: int) -> bool:
     return all(
         selected_counts[category] >= samples_per_category
-        for category in TARGET_CATEGORIES
+        for category in selected_counts
     )
 
 
@@ -165,6 +170,7 @@ def configure_diagnostic_env_cfg(
     cfg: ManagerBasedRlEnvCfg,
     *,
     seed: int,
+    scenario: SlalomScenario | None = None,
 ) -> ManagerBasedRlEnvCfg:
     """Freeze BallSlalom at its final training distribution with full DR."""
     cfg.scene.num_envs = 1
@@ -193,6 +199,8 @@ def configure_diagnostic_env_cfg(
         "y": (-SLALOM_PUSH_RANGE, SLALOM_PUSH_RANGE),
     }
     cfg.curriculum.clear()
+    if scenario is not None:
+        configure_slalom_scenario(cfg, scenario)
 
     cfg.viewer.origin_type = cfg.viewer.OriginType.WORLD
     cfg.viewer.entity_name = None
@@ -263,9 +271,12 @@ def _capture_frame(raw_env: ManagerBasedRlEnv, telemetry_index: int) -> SimFrame
     )
 
 
-def course_camera_pose(start_xy: tuple[float, float], yaw: float) -> CameraPose:
+def course_camera_pose(
+    start_xy: tuple[float, float],
+    yaw: float,
+    center_distance: float = 0.60,
+) -> CameraPose:
     """Place one fixed world camera around the center of the rotated course."""
-    center_distance = 0.60
     lookat = (
         start_xy[0] + center_distance * math.cos(yaw),
         start_xy[1] + center_distance * math.sin(yaw),
@@ -283,7 +294,10 @@ def _read_course_camera(raw_env: ManagerBasedRlEnv) -> CameraPose:
         2.0 * (qw * qz + qx * qy),
         1.0 - 2.0 * (qy * qy + qz * qz),
     )
-    return course_camera_pose((float(start[0]), float(start[1])), yaw)
+    center_distance = command.cfg.cone_x[-1] / 2
+    return course_camera_pose(
+        (float(start[0]), float(start[1])), yaw, center_distance=center_distance
+    )
 
 
 def _first_index(values: Iterable[bool], start: int) -> int | None:
@@ -496,7 +510,8 @@ def _overlay(
     lines = [
         (
             f"episode={rollout.episode:04d}  outcome={rollout.category}  "
-            f"t={sample.time_s:5.2f}s  waypoint={sample.waypoint}/3  "
+            f"t={sample.time_s:5.2f}s  "
+            f"waypoint={sample.waypoint}/{rollout.total_waypoints}  "
             f"side={sample.course_side}"
         ),
         (
@@ -758,6 +773,8 @@ def run_diagnosis(
     samples_per_category: int,
     max_episodes: int,
     device: str,
+    scenario: SlalomScenario | None = None,
+    target_categories: tuple[str, ...] = TARGET_CATEGORIES,
 ) -> bool:
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
@@ -765,13 +782,20 @@ def run_diagnosis(
         raise ValueError("samples_per_category must be positive")
     if max_episodes < samples_per_category:
         raise ValueError("max_episodes must be at least samples_per_category")
+    if not target_categories or any(
+        category not in OUTCOME_CATEGORIES for category in target_categories
+    ):
+        raise ValueError("target_categories must contain known outcome categories")
     output_dir.mkdir(parents=True, exist_ok=False)
     episodes_dir = output_dir / "episodes"
     episodes_dir.mkdir()
-    for category in TARGET_CATEGORIES:
+    for category in target_categories:
         (output_dir / category).mkdir()
 
-    env_cfg = configure_diagnostic_env_cfg(load_env_cfg(TASK_ID), seed=seed)
+    env_cfg = configure_diagnostic_env_cfg(
+        load_env_cfg(TASK_ID), seed=seed, scenario=scenario
+    )
+    total_waypoints = len(env_cfg.commands["body_pose"].cone_x)
     ball_lost_params = env_cfg.terminations["ball_lost"].params
     ball_lost_thresholds = BallLostThresholds(
         min_forward=float(ball_lost_params["min_forward"]),
@@ -791,7 +815,7 @@ def run_diagnosis(
     )
     policy = runner.get_inference_policy(device=device)
 
-    selected_counts = {category: 0 for category in TARGET_CATEGORIES}
+    selected_counts = {category: 0 for category in target_categories}
     selected: list[SelectedRollout] = []
     records: list[dict[str, Any]] = []
     actor_dim = 0
@@ -861,6 +885,7 @@ def run_diagnosis(
                             frames=frames,
                             camera=camera,
                             analysis=analysis,
+                            total_waypoints=total_waypoints,
                         )
                     )
 
@@ -908,12 +933,13 @@ def run_diagnosis(
     complete = quotas_met(selected_counts, samples_per_category)
     missing = {
         category: max(0, samples_per_category - selected_counts[category])
-        for category in TARGET_CATEGORIES
+        for category in target_categories
     }
     manifest = {
         "task": TASK_ID,
         "checkpoint": str(checkpoint.resolve()),
         "seed": seed,
+        "scenario": asdict(scenario) if scenario is not None else None,
         "episodes_scanned": len(records),
         "max_episodes": max_episodes,
         "samples_per_category": samples_per_category,
@@ -943,13 +969,16 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=789)
     parser.add_argument("--samples-per-category", type=int, default=SAMPLE_LIMIT)
     parser.add_argument("--max-episodes", type=int, default=MAX_SCAN_EPISODES)
+    parser.add_argument("--scenario", choices=tuple(GENERALIZATION_SCENARIOS))
+    parser.add_argument("--success-only", action="store_true")
     parser.add_argument(
         "--device",
         default="cuda:0" if torch.cuda.is_available() else "cpu",
     )
     args = parser.parse_args()
+    scenario = GENERALIZATION_SCENARIOS.get(args.scenario)
     output_dir = args.output_dir or (
-        args.checkpoint.parent / "diagnostics" / f"seed_{args.seed}"
+        args.checkpoint.parent / "diagnostics" / (args.scenario or f"seed_{args.seed}")
     )
     configure_torch_backends()
     complete = run_diagnosis(
@@ -959,6 +988,8 @@ def main() -> None:
         samples_per_category=args.samples_per_category,
         max_episodes=args.max_episodes,
         device=args.device,
+        scenario=scenario,
+        target_categories=("success",) if args.success_only else TARGET_CATEGORIES,
     )
     raise SystemExit(0 if complete else 1)
 

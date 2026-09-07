@@ -17,6 +17,7 @@ from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
 )
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "scripts"))
 SPEC = importlib.util.spec_from_file_location(
     "diagnose_ball_slalom", REPO / "scripts" / "diagnose_ball_slalom.py"
 )
@@ -79,6 +80,15 @@ def test_selection_keeps_only_the_earliest_requested_samples():
     assert diag.quotas_met(selected, samples_per_category=8)
 
 
+def test_success_only_selection_uses_the_requested_category_set():
+    selected = {"success": 0}
+
+    assert not diag.should_select("fall_wp3", selected, samples_per_category=1)
+    assert diag.should_select("success", selected, samples_per_category=1)
+    selected["success"] += 1
+    assert diag.quotas_met(selected, samples_per_category=1)
+
+
 def test_simultaneous_terminal_is_never_selected_as_a_failure_sample():
     selected = {category: 0 for category in diag.TARGET_CATEGORIES}
 
@@ -128,6 +138,20 @@ def test_diagnostic_cfg_freezes_final_course_and_keeps_full_dr():
     assert cfg.viewer.max_extra_envs == 0
     assert (cfg.viewer.width, cfg.viewer.height) == (960, 720)
     assert cfg.viewer.distance == 3.6
+
+
+def test_diagnostic_cfg_accepts_a_generalization_course():
+    scenario = diag.GENERALIZATION_SCENARIOS["five_tight"]
+    cfg = diag.configure_diagnostic_env_cfg(
+        make_microduck_ball_slalom_env_cfg(), seed=789, scenario=scenario
+    )
+
+    assert cfg.commands["body_pose"].cone_x == scenario.cone_x
+    assert cfg.commands["body_pose"].lateral_offset == scenario.lateral_offset
+    assert cfg.episode_length_s == scenario.episode_length_s
+    assert cfg.scene.entities["slalom_course"].build().geom_names == tuple(
+        f"slalom_cone_{index}" for index in range(1, 6)
+    )
 
 
 def _telemetry(
