@@ -30,6 +30,7 @@ from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
     SLALOM_MIN_BALL_FORWARD,
     SLALOM_OBSTACLE_COST_WEIGHT,
     SLALOM_PROGRESS_REWARD_WEIGHT,
+    SLALOM_PREVIEW_DISTANCE,
     SLALOM_PUSH_RANGE,
     SLALOM_ROUTE_LATERAL_MARGIN,
     SLALOM_SMALL_LATERAL_OFFSET,
@@ -83,8 +84,9 @@ def test_slalom_command_and_curriculum_reach_the_complete_course():
     command = cfg.commands["body_pose"]
 
     assert isinstance(command, mdp.BallSlalomCommandCfg)
-    assert command.preview_distance == 0.25
     assert command.waypoint_clearance == SLALOM_WAYPOINT_CLEARANCE
+    assert command.preview_distance == SLALOM_PREVIEW_DISTANCE
+    assert SLALOM_PREVIEW_DISTANCE == 0.40
     assert command.route_lateral_margin == SLALOM_ROUTE_LATERAL_MARGIN
     assert command.lateral_offset == SLALOM_INITIAL_LATERAL_OFFSET
     assert command.distance_scale == DRIBBLE_TARGET_DISTANCE_SCALE
