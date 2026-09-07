@@ -28,9 +28,10 @@ def _slalom_term() -> mdp.BallSlalomCommand:
         step_dt=0.02,
     )
     term.cfg = SimpleNamespace(
-        cone_x=(0.35, 0.70, 1.05),
+        cone_x=(0.45, 0.90, 1.35),
         lateral_offset=0.16,
-        waypoint_clearance=0.12,
+        waypoint_clearance=0.04,
+        route_lateral_margin=0.06,
         ball_position_scale=0.30,
         preview_distance=0.25,
         distance_scale=1.0,
@@ -60,6 +61,9 @@ def _slalom_term() -> mdp.BallSlalomCommand:
     term._waypoint_index = torch.zeros(1, dtype=torch.long)
     term._course_side = torch.ones(1)
     term._completed = torch.zeros(1, dtype=torch.bool)
+    term._invalid = torch.zeros(1, dtype=torch.bool)
+    term._course_forward_w = torch.zeros(1, 2)
+    term._course_lateral_w = torch.zeros(1, 2)
     return term
 
 
@@ -67,14 +71,14 @@ def test_slalom_waypoints_alternate_and_course_is_anchored_to_ball():
     term = _slalom_term()
     term._update_command()
 
-    assert torch.allclose(term.target_pos_w, torch.tensor([[0.57, 0.16]]))
+    assert torch.allclose(term.target_pos_w, torch.tensor([[0.59, 0.16]]))
     assert torch.allclose(
         term._waypoint_pos_w[0],
         torch.tensor(
             [
-                [0.57, 0.16],
-                [0.92, -0.16],
-                [1.27, 0.16],
+                [0.59, 0.16],
+                [1.04, -0.16],
+                [1.49, 0.16],
             ]
         ),
     )
@@ -132,20 +136,38 @@ def test_slalom_advances_in_order_and_finishes_after_the_last_cone():
     term._update_command()
 
     expected_targets = (
-        torch.tensor([0.92, -0.16]),
-        torch.tensor([1.27, 0.16]),
+        torch.tensor([1.04, -0.16]),
+        torch.tensor([1.49, 0.16]),
+    )
+    robot_route_points = (
+        torch.tensor([0.56, 0.10]),
+        torch.tensor([1.01, -0.10]),
+        torch.tensor([1.46, 0.10]),
     )
     for index, expected in enumerate(expected_targets, start=1):
         term._ball.data.root_link_pos_w[0, :2] = term.target_pos_w[0]
+        term._robot.data.root_link_pos_w[0, :2] = robot_route_points[index - 1]
         term._update_command()
         assert term.waypoint_index.item() == index
         assert not term.completed.item()
         assert torch.allclose(term.target_pos_w[0], expected)
 
     term._ball.data.root_link_pos_w[0, :2] = term.target_pos_w[0]
+    term._robot.data.root_link_pos_w[0, :2] = robot_route_points[2]
     term._update_command()
     assert term.completed.item()
     assert term.target_epoch.item() == 4
+
+
+def test_slalom_does_not_advance_when_robot_has_not_passed_the_cone_on_route_side():
+    term = _slalom_term()
+    term._update_command()
+    term._ball.data.root_link_pos_w[0, :2] = term.target_pos_w[0]
+    term._robot.data.root_link_pos_w[0, :2] = torch.tensor([0.56, -0.10])
+
+    term._update_command()
+
+    assert term.waypoint_index.item() == 0
 
 
 def test_slalom_always_requires_all_three_waypoints():
@@ -154,6 +176,7 @@ def test_slalom_always_requires_all_three_waypoints():
 
     assert term.total_waypoints.item() == 3
     term._ball.data.root_link_pos_w[0, :2] = term.target_pos_w[0]
+    term._robot.data.root_link_pos_w[0, :2] = torch.tensor([0.56, 0.10])
     term._update_command()
 
     assert not term.completed.item()
@@ -238,6 +261,9 @@ def test_slalom_metrics_report_ordered_completion_and_side_mass():
     assert mdp.ball_slalom_side_mass(env, "right").item() == 1.0
     term._completed[:] = True
     assert mdp.ball_slalom_success(env).item() == 1.0
+
+    term._invalid = torch.ones(1, dtype=torch.bool)
+    assert mdp.ball_slalom_success(env).item() == 0.0
 
 
 def test_slalom_curriculum_updates_goal_radius_with_course_geometry():

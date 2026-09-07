@@ -5940,6 +5940,10 @@ class BallSlalomCommand(BallTargetCommand):
             raise ValueError("waypoint_clearance must be positive")
         if cfg.ball_position_scale <= 0.0:
             raise ValueError("ball_position_scale must be positive")
+        if not 0.0 < cfg.route_lateral_margin <= cfg.lateral_offset:
+            raise ValueError(
+                "route_lateral_margin must be positive and not exceed lateral_offset"
+            )
         if cfg.preview_distance <= cfg.goal_radius:
             raise ValueError("preview_distance must exceed goal_radius")
 
@@ -5956,6 +5960,11 @@ class BallSlalomCommand(BallTargetCommand):
         self._completed = torch.zeros(
             env.num_envs, device=env.device, dtype=torch.bool
         )
+        self._invalid = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.bool
+        )
+        self._course_forward_w = torch.zeros(env.num_envs, 2, device=env.device)
+        self._course_lateral_w = torch.zeros(env.num_envs, 2, device=env.device)
 
     @property
     def waypoint_index(self) -> torch.Tensor:
@@ -5973,6 +5982,10 @@ class BallSlalomCommand(BallTargetCommand):
     def completed(self) -> torch.Tensor:
         return self._completed
 
+    @property
+    def invalid(self) -> torch.Tensor:
+        return self._invalid
+
     def _resample_command(self, env_ids: torch.Tensor) -> None:
         if len(env_ids) == 0:
             return
@@ -5983,6 +5996,7 @@ class BallSlalomCommand(BallTargetCommand):
         )
         self._waypoint_index[env_ids] = 0
         self._completed[env_ids] = False
+        self._invalid[env_ids] = False
         self._pending[env_ids] = True
 
     def _update_command(self) -> None:
@@ -5997,6 +6011,8 @@ class BallSlalomCommand(BallTargetCommand):
             )
             cos_y = torch.cos(yaw)
             sin_y = torch.sin(yaw)
+            self._course_forward_w[env_ids] = torch.stack((cos_y, sin_y), dim=1)
+            self._course_lateral_w[env_ids] = torch.stack((-sin_y, cos_y), dim=1)
             ball_xy = self._ball.data.root_link_pos_w[env_ids, :2]
             self._start_ball_pos_w[env_ids] = ball_xy
 
@@ -6068,10 +6084,48 @@ class BallSlalomCommand(BallTargetCommand):
         current_distance = torch.linalg.vector_norm(
             current_target - self._ball.data.root_link_pos_w[:, :2], dim=1
         )
+        ball_from_origin = (
+            self._ball.data.root_link_pos_w[:, :2] - self._start_ball_pos_w
+        )
+        robot_from_origin = (
+            self._robot.data.root_link_pos_w[:, :2] - self._start_ball_pos_w
+        )
+        ball_course_x = (ball_from_origin * self._course_forward_w).sum(dim=1)
+        ball_course_y = (ball_from_origin * self._course_lateral_w).sum(dim=1)
+        robot_course_x = (robot_from_origin * self._course_forward_w).sum(dim=1)
+        robot_course_y = (robot_from_origin * self._course_lateral_w).sum(dim=1)
+        cone_x = torch.as_tensor(
+            self.cfg.cone_x,
+            device=self.device,
+            dtype=ball_course_x.dtype,
+        )[self._waypoint_index]
+        alternating = torch.where(
+            self._waypoint_index.remainder(2) == 0,
+            torch.ones_like(self._course_side),
+            -torch.ones_like(self._course_side),
+        )
+        expected_side = self._course_side * alternating
+        ball_past_cone = ball_course_x >= cone_x
+        robot_past_cone = robot_course_x >= cone_x
+        ball_on_route_side = (
+            expected_side * ball_course_y >= self.cfg.route_lateral_margin
+        )
+        robot_on_route_side = (
+            expected_side * robot_course_y >= self.cfg.route_lateral_margin
+        )
+        active = ~initialized & ~self._completed & ~self._invalid
+        self._invalid |= active & (
+            (ball_past_cone & ~ball_on_route_side)
+            | (robot_past_cone & ~robot_on_route_side)
+        )
         reached = (
-            ~initialized
-            & ~self._completed
+            active
+            & ~self._invalid
             & (current_distance <= self.cfg.goal_radius)
+            & ball_past_cone
+            & robot_past_cone
+            & ball_on_route_side
+            & robot_on_route_side
         )
         last_waypoint = self.total_waypoints - 1
         advance = reached & (self._waypoint_index < last_waypoint)
@@ -6171,6 +6225,7 @@ class BallSlalomCommandCfg(BallTargetCommandCfg):
     cone_x: tuple[float, ...] = (0.35, 0.70, 1.05)
     lateral_offset: float = 0.12
     waypoint_clearance: float = 0.12
+    route_lateral_margin: float = 0.06
     ball_position_scale: float = 0.30
     preview_distance: float = 0.25
     ranges: tuple[tuple[float, float], tuple[float, float]] = (
@@ -6814,7 +6869,16 @@ def ball_slalom_success(
     command_name: str = "body_pose",
 ) -> torch.Tensor:
     command = _ball_slalom_command(env, command_name)
-    return (command.completed & ~env.termination_manager.terminated).float()
+    return (
+        command.completed & ~command.invalid & ~env.termination_manager.terminated
+    ).float()
+
+
+def ball_slalom_invalid_route(
+    env: ManagerBasedRlEnv,
+    command_name: str = "body_pose",
+) -> torch.Tensor:
+    return _ball_slalom_command(env, command_name).invalid
 
 
 def ball_slalom_side_mass(
@@ -6854,9 +6918,21 @@ def slalom_obstacle_contact_cost(
         raise TypeError("robot_sensor_name must resolve to a ContactSensor")
     if ball_sensor.data.found is None or robot_sensor.data.found is None:
         raise ValueError("slalom contact sensors must expose the found field")
-    ball_contact = (ball_sensor.data.found > 0).any(dim=1)
-    robot_contact = (robot_sensor.data.found > 0).any(dim=1)
+    ball_contact = (ball_sensor.data.found > 0).flatten(start_dim=1).any(dim=1)
+    robot_contact = (robot_sensor.data.found > 0).flatten(start_dim=1).any(dim=1)
     return (ball_contact | robot_contact).float()
+
+
+def slalom_obstacle_contact(
+    env: ManagerBasedRlEnv,
+    ball_sensor_name: str,
+    robot_sensor_name: str,
+) -> torch.Tensor:
+    return slalom_obstacle_contact_cost(
+        env,
+        ball_sensor_name=ball_sensor_name,
+        robot_sensor_name=robot_sensor_name,
+    ).bool()
 
 
 def slalom_course_curriculum(

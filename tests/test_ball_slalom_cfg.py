@@ -31,6 +31,7 @@ from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
     SLALOM_OBSTACLE_COST_WEIGHT,
     SLALOM_PROGRESS_REWARD_WEIGHT,
     SLALOM_PUSH_RANGE,
+    SLALOM_ROUTE_LATERAL_MARGIN,
     SLALOM_SMALL_LATERAL_OFFSET,
     SLALOM_SUCCESS_REWARD_WEIGHT,
     SLALOM_TERMINATION_COST_WEIGHT,
@@ -53,6 +54,10 @@ def test_slalom_course_asset_contains_three_physical_markers():
     assert (
         tuple(course.spec.geom(f"slalom_cone_{index}").pos[0] for index in range(1, 4))
         == SLALOM_CONE_X
+    )
+    assert all(
+        next_x - current_x >= 0.45
+        for current_x, next_x in zip(SLALOM_CONE_X, SLALOM_CONE_X[1:])
     )
 
 
@@ -80,6 +85,7 @@ def test_slalom_command_and_curriculum_reach_the_complete_course():
     assert isinstance(command, mdp.BallSlalomCommandCfg)
     assert command.preview_distance == 0.25
     assert command.waypoint_clearance == SLALOM_WAYPOINT_CLEARANCE
+    assert command.route_lateral_margin == SLALOM_ROUTE_LATERAL_MARGIN
     assert command.lateral_offset == SLALOM_INITIAL_LATERAL_OFFSET
     assert command.distance_scale == DRIBBLE_TARGET_DISTANCE_SCALE
     assert command.ball_position_scale == DRIBBLE_CONTROL_RADIUS
@@ -99,6 +105,7 @@ def test_slalom_command_and_curriculum_reach_the_complete_course():
         (3200 * 24, SLALOM_LARGE_LATERAL_OFFSET, SLALOM_INITIAL_GOAL_RADIUS),
         (4200 * 24, SLALOM_FINAL_LATERAL_OFFSET, SLALOM_INITIAL_GOAL_RADIUS),
         (5000 * 24, SLALOM_FINAL_LATERAL_OFFSET, SLALOM_MEDIUM_GOAL_RADIUS),
+        (6000 * 24, SLALOM_FINAL_LATERAL_OFFSET, SLALOM_GOAL_RADIUS),
     ]
     assert "target_range" not in cfg.curriculum
     assert "com_range" not in cfg.curriculum
@@ -145,6 +152,24 @@ def test_slalom_command_and_curriculum_reach_the_complete_course():
     assert cfg.rewards["course_success"].weight == SLALOM_SUCCESS_REWARD_WEIGHT
 
 
+def test_straight_waypoint_segments_clear_each_cone_by_the_route_margin():
+    points = [(0.0, 0.0)] + [
+        (
+            cone_x + SLALOM_WAYPOINT_CLEARANCE,
+            (1.0 if index % 2 == 0 else -1.0) * SLALOM_FINAL_LATERAL_OFFSET,
+        )
+        for index, cone_x in enumerate(SLALOM_CONE_X)
+    ]
+
+    for index, cone_x in enumerate(SLALOM_CONE_X, start=1):
+        start_x, start_y = points[index - 1]
+        end_x, end_y = points[index]
+        fraction = (cone_x - start_x) / (end_x - start_x)
+        crossing_y = start_y + fraction * (end_y - start_y)
+        expected_side = 1.0 if index % 2 == 1 else -1.0
+        assert expected_side * crossing_y >= SLALOM_ROUTE_LATERAL_MARGIN
+
+
 def test_slalom_play_uses_three_cones_without_training_curricula_or_pushes():
     cfg = make_microduck_ball_slalom_env_cfg(play=True)
     command = cfg.commands["body_pose"]
@@ -172,6 +197,11 @@ def test_slalom_obstacle_contact_is_a_nonnegative_cost_with_negative_weight():
     assert cost.weight < 0.0
     sensor_names = {sensor.name for sensor in cfg.scene.sensors}
     assert {"ball_marker_contact", "robot_marker_contact"} <= sensor_names
+    assert cfg.terminations["obstacle_contact"].func is mdp.slalom_obstacle_contact
+    assert cfg.terminations["invalid_route"].func is mdp.ball_slalom_invalid_route
+    for sensor in cfg.scene.sensors:
+        if sensor.name in {"ball_marker_contact", "robot_marker_contact"}:
+            assert sensor.history_length == cfg.decimation
 
 
 def test_slalom_uses_official_failure_termination_cost():

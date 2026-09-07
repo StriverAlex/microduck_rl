@@ -14,8 +14,123 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 
 from mjlab_microduck.tasks import mdp as microduck_mdp
+from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
+    SLALOM_FINAL_LATERAL_OFFSET,
+    SLALOM_GOAL_RADIUS,
+    SLALOM_ROUTE_LATERAL_MARGIN,
+)
 
 TASK_ID = "Mjlab-BallSlalom-Flat-MicroDuck"
+STRICT_ROUTE_LATERAL_MARGIN = SLALOM_ROUTE_LATERAL_MARGIN
+
+
+class StrictRouteTracker:
+    """Track ordered, collision-free crossings of every cone plane."""
+
+    def __init__(self, command, robot_xy: torch.Tensor, ball_xy: torch.Tensor):
+        self.course_side = command.course_side.clone()
+        self.cone_x = torch.as_tensor(
+            command.cfg.cone_x, device=ball_xy.device, dtype=ball_xy.dtype
+        )
+        first_local_x = command.cfg.cone_x[0] + command.cfg.waypoint_clearance
+        first_local_y = self.course_side * command.cfg.lateral_offset
+        first_world = command._waypoint_pos_w[:, 0] - command._start_ball_pos_w
+        denominator = first_local_x**2 + first_local_y**2
+        cos_yaw = (
+            first_world[:, 0] * first_local_x + first_world[:, 1] * first_local_y
+        ) / denominator
+        sin_yaw = (
+            first_world[:, 1] * first_local_x - first_world[:, 0] * first_local_y
+        ) / denominator
+        self.forward_w = torch.stack((cos_yaw, sin_yaw), dim=1)
+        self.lateral_w = torch.stack((-sin_yaw, cos_yaw), dim=1)
+        self.origin_w = command._start_ball_pos_w.clone()
+        self.ball_index = torch.zeros_like(command.waypoint_index)
+        self.robot_index = torch.zeros_like(command.waypoint_index)
+        self.ball_wrong_side = torch.zeros_like(command.completed, dtype=torch.bool)
+        self.robot_wrong_side = torch.zeros_like(command.completed, dtype=torch.bool)
+        self.ball_contact = torch.zeros_like(command.completed, dtype=torch.bool)
+        self.robot_contact = torch.zeros_like(command.completed, dtype=torch.bool)
+        self.previous_ball = self.course_coordinates(ball_xy)
+        self.previous_robot = self.course_coordinates(robot_xy)
+
+    def course_coordinates(self, position_w: torch.Tensor) -> torch.Tensor:
+        offset = position_w - self.origin_w
+        return torch.stack(
+            (
+                (offset * self.forward_w).sum(dim=1),
+                (offset * self.lateral_w).sum(dim=1),
+            ),
+            dim=1,
+        )
+
+    def _update_entity(
+        self,
+        index: torch.Tensor,
+        wrong_side: torch.Tensor,
+        previous: torch.Tensor,
+        current: torch.Tensor,
+        active: torch.Tensor,
+    ) -> None:
+        incomplete = index < len(self.cone_x)
+        lookup = index.clamp(max=len(self.cone_x) - 1)
+        plane_x = self.cone_x[lookup]
+        crossed = (
+            active
+            & incomplete
+            & (previous[:, 0] < plane_x)
+            & (current[:, 0] >= plane_x)
+        )
+        alternating = torch.where(
+            lookup.remainder(2) == 0,
+            torch.ones_like(self.course_side),
+            -torch.ones_like(self.course_side),
+        )
+        correct_side = (
+            self.course_side * alternating * current[:, 1]
+            >= STRICT_ROUTE_LATERAL_MARGIN
+        )
+        wrong_side |= crossed & ~correct_side
+        index += (crossed & correct_side).long()
+        previous.copy_(current)
+
+    def update(
+        self,
+        robot_xy: torch.Tensor,
+        ball_xy: torch.Tensor,
+        ball_contact: torch.Tensor,
+        robot_contact: torch.Tensor,
+        active: torch.Tensor,
+    ) -> None:
+        current_ball = self.course_coordinates(ball_xy)
+        current_robot = self.course_coordinates(robot_xy)
+        self._update_entity(
+            self.ball_index,
+            self.ball_wrong_side,
+            self.previous_ball,
+            current_ball,
+            active,
+        )
+        self._update_entity(
+            self.robot_index,
+            self.robot_wrong_side,
+            self.previous_robot,
+            current_robot,
+            active,
+        )
+        self.ball_contact |= active & ball_contact
+        self.robot_contact |= active & robot_contact
+
+    @property
+    def completed(self) -> torch.Tensor:
+        return (
+            (self.ball_index == len(self.cone_x))
+            & (self.robot_index == len(self.cone_x))
+            & ~self.ball_wrong_side
+            & ~self.robot_wrong_side
+            & ~self.ball_contact
+            & ~self.robot_contact
+        )
 
 
 @dataclass(frozen=True)
@@ -23,11 +138,23 @@ class RolloutResult:
     checkpoint: str
     episodes: int
     success_rate: float
+    strict_success_rate: float
     completion_rate: float
     fall_rate: float
     ball_lost_rate: float
+    obstacle_contact_termination_rate: float
+    invalid_route_termination_rate: float
     left_success_rate: float
     right_success_rate: float
+    strict_left_success_rate: float
+    strict_right_success_rate: float
+    ball_route_completion_rate: float
+    robot_route_completion_rate: float
+    ball_wrong_side_rate: float
+    robot_wrong_side_rate: float
+    ball_marker_contact_rate: float
+    robot_marker_contact_rate: float
+    obstacle_contact_waypoint_counts: tuple[int, int, int]
     fall_waypoint_counts: tuple[int, int, int]
     ball_lost_waypoint_counts: tuple[int, int, int]
     ball_lost_backward_count: int
@@ -63,7 +190,10 @@ def evaluate_checkpoint(
     if not 0 < episodes <= num_envs:
         raise ValueError("episodes must satisfy 0 < episodes <= num_envs")
 
-    env_cfg = load_env_cfg(TASK_ID, play=True)
+    env_cfg = load_env_cfg(TASK_ID)
+    env_cfg.commands["body_pose"].lateral_offset = SLALOM_FINAL_LATERAL_OFFSET
+    env_cfg.commands["body_pose"].goal_radius = SLALOM_GOAL_RADIUS
+    env_cfg.curriculum.clear()
     if goal_radius is not None:
         if goal_radius <= 0.0:
             raise ValueError("goal_radius must be positive")
@@ -95,6 +225,12 @@ def evaluate_checkpoint(
     completions = torch.zeros(num_envs, device=device)
     falls = torch.zeros(num_envs, dtype=torch.bool, device=device)
     ball_losses = torch.zeros(num_envs, dtype=torch.bool, device=device)
+    obstacle_contact_terminations = torch.zeros(
+        num_envs, dtype=torch.bool, device=device
+    )
+    invalid_route_terminations = torch.zeros(
+        num_envs, dtype=torch.bool, device=device
+    )
     course_sides = torch.zeros(num_envs, device=device)
     terminal_waypoints = torch.zeros(num_envs, dtype=torch.long, device=device)
     terminal_ball_position = torch.zeros(num_envs, 3, device=device)
@@ -107,6 +243,12 @@ def evaluate_checkpoint(
 
     try:
         obs = env.get_observations()
+        command = raw_env.command_manager.get_term("body_pose")
+        tracker = StrictRouteTracker(
+            command,
+            raw_env.scene["robot"].data.root_link_pos_w[:, :2],
+            raw_env.scene["ball"].data.root_link_pos_w[:, :2],
+        )
         with torch.inference_mode():
             while active.any():
                 actor_obs = obs["actor"]
@@ -123,6 +265,20 @@ def evaluate_checkpoint(
 
                 command = raw_env.command_manager.get_term("body_pose")
                 ball = raw_env.scene["ball"]
+                robot = raw_env.scene["robot"]
+                ball_contact = (
+                    raw_env.scene["ball_marker_contact"].data.found > 0
+                ).flatten(start_dim=1).any(dim=1)
+                robot_contact = (
+                    raw_env.scene["robot_marker_contact"].data.found > 0
+                ).flatten(start_dim=1).any(dim=1)
+                tracker.update(
+                    robot.data.root_link_pos_w[:, :2],
+                    ball.data.root_link_pos_w[:, :2],
+                    ball_contact,
+                    robot_contact,
+                    active,
+                )
                 target_speed = (
                     ball.data.root_link_lin_vel_w[:, :2] * command.direction_w
                 ).sum(dim=1)
@@ -150,6 +306,12 @@ def evaluate_checkpoint(
                     ball_losses[newly_done] = raw_env.termination_manager.get_term(
                         "ball_lost"
                     )[newly_done]
+                    obstacle_contact_terminations[newly_done] = (
+                        raw_env.termination_manager.get_term("obstacle_contact")
+                    )[newly_done]
+                    invalid_route_terminations[newly_done] = (
+                        raw_env.termination_manager.get_term("invalid_route")
+                    )[newly_done]
                     course_sides[newly_done] = command.course_side[newly_done]
                     terminal_waypoints[newly_done] = command.waypoint_index[newly_done]
                     terminal_ball_position[newly_done] = microduck_mdp.ball_pos_in_base(
@@ -166,8 +328,11 @@ def evaluate_checkpoint(
 
     selected = slice(0, episodes)
     selected_successes = successes[selected]
+    strict_successes = selected_successes & tracker.completed[selected]
     selected_falls = falls[selected]
     selected_ball_losses = ball_losses[selected]
+    selected_obstacle_contacts = obstacle_contact_terminations[selected]
+    selected_invalid_routes = invalid_route_terminations[selected]
     selected_sides = course_sides[selected]
     selected_waypoints = terminal_waypoints[selected]
     selected_peak_speed = peak_target_speed[selected]
@@ -179,11 +344,36 @@ def evaluate_checkpoint(
         checkpoint=str(checkpoint.resolve()),
         episodes=episodes,
         success_rate=selected_successes.float().mean().item(),
+        strict_success_rate=strict_successes.float().mean().item(),
         completion_rate=completions[selected].mean().item(),
         fall_rate=selected_falls.float().mean().item(),
         ball_lost_rate=selected_ball_losses.float().mean().item(),
+        obstacle_contact_termination_rate=selected_obstacle_contacts.float()
+        .mean()
+        .item(),
+        invalid_route_termination_rate=selected_invalid_routes.float().mean().item(),
         left_success_rate=selected_successes[left].float().mean().item(),
         right_success_rate=selected_successes[right].float().mean().item(),
+        strict_left_success_rate=strict_successes[left].float().mean().item(),
+        strict_right_success_rate=strict_successes[right].float().mean().item(),
+        ball_route_completion_rate=(tracker.ball_index[selected] == len(tracker.cone_x))
+        .float()
+        .mean()
+        .item(),
+        robot_route_completion_rate=(
+            tracker.robot_index[selected] == len(tracker.cone_x)
+        )
+        .float()
+        .mean()
+        .item(),
+        ball_wrong_side_rate=tracker.ball_wrong_side[selected].float().mean().item(),
+        robot_wrong_side_rate=tracker.robot_wrong_side[selected].float().mean().item(),
+        ball_marker_contact_rate=tracker.ball_contact[selected].float().mean().item(),
+        robot_marker_contact_rate=tracker.robot_contact[selected].float().mean().item(),
+        obstacle_contact_waypoint_counts=tuple(
+            int((selected_obstacle_contacts & (selected_waypoints == index)).sum().item())
+            for index in range(3)
+        ),
         fall_waypoint_counts=tuple(
             int((selected_falls & (selected_waypoints == index)).sum().item())
             for index in range(3)
@@ -196,7 +386,9 @@ def evaluate_checkpoint(
             (
                 selected_ball_losses
                 & (selected_terminal_ball_position[:, 0] < min_ball_forward)
-            ).sum().item()
+            )
+            .sum()
+            .item()
         ),
         ball_lost_distance_count=int(
             (
@@ -207,38 +399,52 @@ def evaluate_checkpoint(
                     )
                     > max_ball_distance
                 )
-            ).sum().item()
+            )
+            .sum()
+            .item()
         ),
         ball_lost_lateral_count=int(
             (
                 selected_ball_losses
                 & (selected_terminal_ball_position[:, 1].abs() > max_ball_lateral)
-            ).sum().item()
+            )
+            .sum()
+            .item()
         ),
         simultaneous_fall_and_ball_lost_count=int(
             (selected_falls & selected_ball_losses).sum().item()
         ),
         timeout_count=int(
-            (~selected_successes & ~selected_falls & ~selected_ball_losses).sum().item()
+            (
+                ~selected_successes
+                & ~selected_falls
+                & ~selected_ball_losses
+                & ~selected_obstacle_contacts
+                & ~selected_invalid_routes
+            )
+            .sum()
+            .item()
         ),
         mean_peak_target_speed=selected_peak_speed.mean().item(),
-        mean_peak_target_speed_success=selected_peak_speed[
-            selected_successes
-        ].mean().item(),
+        mean_peak_target_speed_success=selected_peak_speed[selected_successes]
+        .mean()
+        .item(),
         mean_peak_target_speed_fall=selected_peak_speed[selected_falls].mean().item(),
-        mean_peak_target_speed_ball_lost=selected_peak_speed[
-            selected_ball_losses
-        ].mean().item(),
+        mean_peak_target_speed_ball_lost=selected_peak_speed[selected_ball_losses]
+        .mean()
+        .item(),
         mean_max_robot_ball_distance=selected_max_distance.mean().item(),
-        mean_max_robot_ball_distance_success=selected_max_distance[
-            selected_successes
-        ].mean().item(),
-        mean_max_robot_ball_distance_fall=selected_max_distance[
-            selected_falls
-        ].mean().item(),
+        mean_max_robot_ball_distance_success=selected_max_distance[selected_successes]
+        .mean()
+        .item(),
+        mean_max_robot_ball_distance_fall=selected_max_distance[selected_falls]
+        .mean()
+        .item(),
         mean_max_robot_ball_distance_ball_lost=selected_max_distance[
             selected_ball_losses
-        ].mean().item(),
+        ]
+        .mean()
+        .item(),
         mean_episode_length=lengths[selected].float().mean().item(),
         actor_dim=actor_dim,
         action_dim=action_dim,
@@ -281,8 +487,9 @@ def main() -> None:
         goal_radius=args.goal_radius,
     )
     passed = (
-        candidate.success_rate >= args.min_success_rate
-        and candidate.success_rate >= baseline.success_rate + args.min_success_gain
+        candidate.strict_success_rate >= args.min_success_rate
+        and candidate.strict_success_rate
+        >= baseline.strict_success_rate + args.min_success_gain
         and candidate.fall_rate <= baseline.fall_rate
         and candidate.ball_lost_rate
         <= baseline.ball_lost_rate + args.max_ball_lost_increase
@@ -293,7 +500,9 @@ def main() -> None:
     result = {
         "baseline": asdict(baseline),
         "candidate": asdict(candidate),
-        "success_gain": candidate.success_rate - baseline.success_rate,
+        "strict_success_gain": (
+            candidate.strict_success_rate - baseline.strict_success_rate
+        ),
         "passed": passed,
     }
     print(json.dumps(result, indent=2, sort_keys=True))

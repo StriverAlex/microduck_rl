@@ -3,11 +3,11 @@
 
     <worldbody>
         <body name="slalom_course">
-            <geom type="cylinder" name="slalom_cone_1" pos="0.35 0 0.05"
+            <geom type="cylinder" name="slalom_cone_1" pos="0.45 0 0.05"
                   size="0.025 0.05" rgba="0.15 0.45 1 1" friction="0.8 0.005 0.0001"/>
-            <geom type="cylinder" name="slalom_cone_2" pos="0.70 0 0.05"
+            <geom type="cylinder" name="slalom_cone_2" pos="0.90 0 0.05"
                   size="0.025 0.05" rgba="0.15 0.45 1 1" friction="0.8 0.005 0.0001"/>
-            <geom type="cylinder" name="slalom_cone_3" pos="1.05 0 0.05"
+            <geom type="cylinder" name="slalom_cone_3" pos="1.35 0 0.05"
                   size="0.025 0.05" rgba="0.15 0.45 1 1" friction="0.8 0.005 0.0001"/>
         </body>
     </worldbody>

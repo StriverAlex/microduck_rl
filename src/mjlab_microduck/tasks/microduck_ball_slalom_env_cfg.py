@@ -29,16 +29,17 @@ from mjlab_microduck.tasks.microduck_ball_dribble_env_cfg import (
 )
 
 SLALOM_EPISODE_LENGTH_S = 15.0
-SLALOM_CONE_X = (0.35, 0.70, 1.05)
+SLALOM_CONE_X = (0.45, 0.90, 1.35)
 SLALOM_INITIAL_LATERAL_OFFSET = 0.08
 SLALOM_SMALL_LATERAL_OFFSET = 0.10
 SLALOM_INTERMEDIATE_LATERAL_OFFSET = 0.12
 SLALOM_LARGE_LATERAL_OFFSET = 0.14
 SLALOM_FINAL_LATERAL_OFFSET = 0.16
-SLALOM_WAYPOINT_CLEARANCE = 0.12
-SLALOM_GOAL_RADIUS = 0.12
+SLALOM_WAYPOINT_CLEARANCE = 0.04
+SLALOM_ROUTE_LATERAL_MARGIN = 0.06
+SLALOM_GOAL_RADIUS = 0.06
 SLALOM_INITIAL_GOAL_RADIUS = DRIBBLE_GOAL_RADIUS
-SLALOM_MEDIUM_GOAL_RADIUS = 0.12
+SLALOM_MEDIUM_GOAL_RADIUS = 0.10
 SLALOM_DISTANCE_SCALE = DRIBBLE_TARGET_DISTANCE_SCALE
 SLALOM_OBSTACLE_COST_WEIGHT = -1.0
 SLALOM_CONTROL_DISTANCE_COST_WEIGHT = -5.0
@@ -78,6 +79,7 @@ def make_microduck_ball_slalom_env_cfg(
         fields=("found",),
         reduce="none",
         num_slots=1,
+        history_length=cfg.decimation,
     )
     robot_marker_contact = ContactSensorCfg(
         name="robot_marker_contact",
@@ -90,6 +92,7 @@ def make_microduck_ball_slalom_env_cfg(
         fields=("found",),
         reduce="none",
         num_slots=1,
+        history_length=cfg.decimation,
     )
     cfg.scene.sensors = cfg.scene.sensors + (
         ball_marker_contact,
@@ -110,6 +113,7 @@ def make_microduck_ball_slalom_env_cfg(
             SLALOM_FINAL_LATERAL_OFFSET if play else SLALOM_INITIAL_LATERAL_OFFSET
         ),
         waypoint_clearance=SLALOM_WAYPOINT_CLEARANCE,
+        route_lateral_margin=SLALOM_ROUTE_LATERAL_MARGIN,
         ball_position_scale=DRIBBLE_CONTROL_RADIUS,
         distance_scale=SLALOM_DISTANCE_SCALE,
         goal_radius=SLALOM_GOAL_RADIUS if play else SLALOM_INITIAL_GOAL_RADIUS,
@@ -122,6 +126,17 @@ def make_microduck_ball_slalom_env_cfg(
             "ball_sensor_name": ball_marker_contact.name,
             "robot_sensor_name": robot_marker_contact.name,
         },
+    )
+    cfg.terminations["obstacle_contact"] = TerminationTermCfg(
+        func=microduck_mdp.slalom_obstacle_contact,
+        params={
+            "ball_sensor_name": ball_marker_contact.name,
+            "robot_sensor_name": robot_marker_contact.name,
+        },
+    )
+    cfg.terminations["invalid_route"] = TerminationTermCfg(
+        func=microduck_mdp.ball_slalom_invalid_route,
+        params={"command_name": "body_pose"},
     )
     cfg.rewards["ball_control_distance"] = RewardTermCfg(
         func=microduck_mdp.ball_control_distance_cost,
@@ -270,6 +285,11 @@ def make_microduck_ball_slalom_env_cfg(
                         "step": 5000 * 24,
                         "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
                         "goal_radius": SLALOM_MEDIUM_GOAL_RADIUS,
+                    },
+                    {
+                        "step": 6000 * 24,
+                        "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
+                        "goal_radius": SLALOM_GOAL_RADIUS,
                     },
                 ],
             },
