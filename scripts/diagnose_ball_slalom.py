@@ -45,8 +45,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CHECKPOINT = (
     REPO_ROOT
     / "logs/rsl_rl/ball_slalom"
-    / "2026-09-07_16-10-59_slalom_spacing_45cm_consolidation_v5"
-    / "model_9996.pt"
+    / "2026-09-07_16-41-42_slalom_preview_40cm_v6"
+    / "model_10250.pt"
 )
 TARGET_CATEGORIES = ("success", "fall_wp3", "ball_lost_wp3")
 OUTCOME_CATEGORIES = (

@@ -26,6 +26,13 @@ sys.modules[SPEC.name] = diag
 SPEC.loader.exec_module(diag)
 
 
+def test_default_checkpoint_is_the_validated_preview_model():
+    assert diag.DEFAULT_CHECKPOINT.parts[-2:] == (
+        "2026-09-07_16-41-42_slalom_preview_40cm_v6",
+        "model_10250.pt",
+    )
+
+
 def _terminal(**overrides):
     values = {
         "completed": False,
