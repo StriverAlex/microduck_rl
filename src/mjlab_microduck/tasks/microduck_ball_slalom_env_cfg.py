@@ -36,6 +36,7 @@ SLALOM_FINAL_WAYPOINTS = 5
 SLALOM_FULL_COURSE_START_PROBS = (1.0, 0.0, 0.0, 0.0, 0.0)
 SLALOM_TAIL_HEAVY_START_PROBS = (0.35, 0.0, 0.25, 0.25, 0.15)
 SLALOM_TAIL_BALANCED_START_PROBS = (0.60, 0.0, 0.15, 0.15, 0.10)
+SLALOM_MIDDLE_FOCUS_START_PROBS = (0.45, 0.25, 0.20, 0.07, 0.03)
 SLALOM_INITIAL_LATERAL_OFFSET = 0.08
 SLALOM_SMALL_LATERAL_OFFSET = 0.10
 SLALOM_INTERMEDIATE_LATERAL_OFFSET = 0.12
@@ -383,6 +384,20 @@ def make_microduck_ball_slalom_env_cfg(
                         "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
                         "goal_radius": SLALOM_GOAL_RADIUS,
                     },
+                    {
+                        "step": 15150 * 24,
+                        "active_waypoints": SLALOM_FINAL_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_MIDDLE_FOCUS_START_PROBS,
+                        "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
+                        "goal_radius": SLALOM_GOAL_RADIUS,
+                    },
+                    {
+                        "step": 15450 * 24,
+                        "active_waypoints": SLALOM_FINAL_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_FULL_COURSE_START_PROBS,
+                        "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
+                        "goal_radius": SLALOM_GOAL_RADIUS,
+                    },
                 ],
             },
         )
@@ -425,7 +440,7 @@ def make_microduck_ball_slalom_env_cfg(
 MicroduckBallSlalomRlCfg = deepcopy(MicroduckBallDribbleRlCfg)
 MicroduckBallSlalomRlCfg.experiment_name = "ball_slalom"
 MicroduckBallSlalomRlCfg.run_name = "ball_slalom"
-MicroduckBallSlalomRlCfg.max_iterations = 15_000
+MicroduckBallSlalomRlCfg.max_iterations = 15_650
 MicroduckBallSlalomRlCfg.algorithm.entropy_coef = SLALOM_ENTROPY_COEF
 MicroduckBallSlalomRlCfg.algorithm.learning_rate = SLALOM_LEARNING_RATE
 MicroduckBallSlalomRlCfg.algorithm.schedule = "fixed"

@@ -33,6 +33,7 @@ from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
     SLALOM_LARGE_LATERAL_OFFSET,
     SLALOM_LEARNING_RATE,
     SLALOM_MEDIUM_GOAL_RADIUS,
+    SLALOM_MIDDLE_FOCUS_START_PROBS,
     SLALOM_MIN_BALL_FORWARD,
     SLALOM_OBSTACLE_COST_WEIGHT,
     SLALOM_PREVIEW_DISTANCE,
@@ -213,6 +214,20 @@ def test_slalom_command_and_curriculum_reach_the_complete_course():
             SLALOM_FINAL_LATERAL_OFFSET,
             SLALOM_GOAL_RADIUS,
         ),
+        (
+            15150 * 24,
+            SLALOM_FINAL_WAYPOINTS,
+            SLALOM_MIDDLE_FOCUS_START_PROBS,
+            SLALOM_FINAL_LATERAL_OFFSET,
+            SLALOM_GOAL_RADIUS,
+        ),
+        (
+            15450 * 24,
+            SLALOM_FINAL_WAYPOINTS,
+            SLALOM_FULL_COURSE_START_PROBS,
+            SLALOM_FINAL_LATERAL_OFFSET,
+            SLALOM_GOAL_RADIUS,
+        ),
     ]
     assert "target_range" not in cfg.curriculum
     assert "com_range" not in cfg.curriculum
@@ -386,7 +401,7 @@ def test_only_base_slalom_task_is_registered():
     assert "Mjlab-BallSlalom-Flat-Backlash-MicroDuck" not in tasks
     assert MicroduckBallSlalomRlCfg.algorithm.symmetry_cfg["use_mirror_loss"] is True
     assert MicroduckBallSlalomRlCfg.experiment_name == "ball_slalom"
-    assert MicroduckBallSlalomRlCfg.max_iterations == 15_000
+    assert MicroduckBallSlalomRlCfg.max_iterations == 15_650
     assert MicroduckBallSlalomRlCfg.algorithm.entropy_coef == SLALOM_ENTROPY_COEF
     assert MicroduckBallSlalomRlCfg.algorithm.learning_rate == SLALOM_LEARNING_RATE
     assert MicroduckBallSlalomRlCfg.algorithm.schedule == "fixed"
