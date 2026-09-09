@@ -192,7 +192,7 @@ register_mjlab_task(
     runner_cls=MicroduckOnPolicyRunner,
 )
 
-# BallSlalom — dribble the same ball around three ordered physical markers.
+# BallSlalom — dribble the same ball around five ordered physical markers.
 register_mjlab_task(
     task_id="Mjlab-BallSlalom-Flat-MicroDuck",
     env_cfg=make_microduck_ball_slalom_env_cfg(),

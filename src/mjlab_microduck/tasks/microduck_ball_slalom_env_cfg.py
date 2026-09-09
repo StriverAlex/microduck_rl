@@ -1,4 +1,4 @@
-"""Sequential three-marker ball slalom for Microduck.
+"""Sequential five-marker ball slalom for Microduck.
 
 The actor keeps the BallDribble 61D observation contract.  Its body command
 contains the ball-to-waypoint direction, the robot-to-ball position, and the
@@ -28,8 +28,14 @@ from mjlab_microduck.tasks.microduck_ball_dribble_env_cfg import (
     make_microduck_ball_dribble_env_cfg,
 )
 
-SLALOM_EPISODE_LENGTH_S = 15.0
-SLALOM_CONE_X = (0.45, 0.90, 1.35)
+SLALOM_EPISODE_LENGTH_S = 25.0
+SLALOM_CONE_X = (0.45, 0.90, 1.35, 1.80, 2.25)
+SLALOM_INITIAL_WAYPOINTS = 3
+SLALOM_INTERMEDIATE_WAYPOINTS = 4
+SLALOM_FINAL_WAYPOINTS = 5
+SLALOM_FULL_COURSE_START_PROBS = (1.0, 0.0, 0.0, 0.0, 0.0)
+SLALOM_TAIL_HEAVY_START_PROBS = (0.35, 0.0, 0.25, 0.25, 0.15)
+SLALOM_TAIL_BALANCED_START_PROBS = (0.60, 0.0, 0.15, 0.15, 0.10)
 SLALOM_INITIAL_LATERAL_OFFSET = 0.08
 SLALOM_SMALL_LATERAL_OFFSET = 0.10
 SLALOM_INTERMEDIATE_LATERAL_OFFSET = 0.12
@@ -43,6 +49,8 @@ SLALOM_INITIAL_GOAL_RADIUS = DRIBBLE_GOAL_RADIUS
 SLALOM_MEDIUM_GOAL_RADIUS = 0.10
 SLALOM_DISTANCE_SCALE = DRIBBLE_TARGET_DISTANCE_SCALE
 SLALOM_OBSTACLE_COST_WEIGHT = -1.0
+SLALOM_BALL_CLEARANCE_DISTANCE = 0.10
+SLALOM_BALL_CLEARANCE_COST_WEIGHT = -4.0
 SLALOM_CONTROL_DISTANCE_COST_WEIGHT = -5.0
 SLALOM_MIN_BALL_FORWARD = -DRIBBLE_CONTROL_RADIUS
 SLALOM_INITIAL_TERMINATION_COST_WEIGHT = -300.0
@@ -60,7 +68,7 @@ SLALOM_PUSH_RANGE = 0.08
 def make_microduck_ball_slalom_env_cfg(
     play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
-    """Create ordered same-ball dribbling around three physical markers."""
+    """Create ordered same-ball dribbling around five physical markers."""
     cfg = make_microduck_ball_dribble_env_cfg(play=play)
     cfg.episode_length_s = SLALOM_EPISODE_LENGTH_S
     cfg.scene.entities = {
@@ -73,7 +81,7 @@ def make_microduck_ball_slalom_env_cfg(
         name="ball_marker_contact",
         primary=ContactMatch(
             mode="geom",
-            pattern=r"^slalom_cone_[123]$",
+            pattern=r"^slalom_cone_[1-5]$",
             entity="slalom_course",
         ),
         secondary=ContactMatch(mode="body", pattern=r"^ball$", entity="ball"),
@@ -86,7 +94,7 @@ def make_microduck_ball_slalom_env_cfg(
         name="robot_marker_contact",
         primary=ContactMatch(
             mode="geom",
-            pattern=r"^slalom_cone_[123]$",
+            pattern=r"^slalom_cone_[1-5]$",
             entity="slalom_course",
         ),
         secondary=ContactMatch(mode="subtree", pattern="trunk_base", entity="robot"),
@@ -109,6 +117,8 @@ def make_microduck_ball_slalom_env_cfg(
         resampling_time_range=command_duration,
         debug_vis=False,
         cone_x=SLALOM_CONE_X,
+        active_waypoints=(SLALOM_FINAL_WAYPOINTS if play else SLALOM_INITIAL_WAYPOINTS),
+        start_waypoint_probs=SLALOM_FULL_COURSE_START_PROBS,
         preview_distance=SLALOM_PREVIEW_DISTANCE,
         lateral_offset=(
             SLALOM_FINAL_LATERAL_OFFSET if play else SLALOM_INITIAL_LATERAL_OFFSET
@@ -126,6 +136,15 @@ def make_microduck_ball_slalom_env_cfg(
         params={
             "ball_sensor_name": ball_marker_contact.name,
             "robot_sensor_name": robot_marker_contact.name,
+        },
+    )
+    cfg.rewards["ball_cone_clearance"] = RewardTermCfg(
+        func=microduck_mdp.slalom_ball_clearance_cost,
+        weight=SLALOM_BALL_CLEARANCE_COST_WEIGHT,
+        params={
+            "command_name": "body_pose",
+            "asset_name": "ball",
+            "clearance_distance": SLALOM_BALL_CLEARANCE_DISTANCE,
         },
     )
     cfg.terminations["obstacle_contact"] = TerminationTermCfg(
@@ -211,6 +230,15 @@ def make_microduck_ball_slalom_env_cfg(
                 },
                 reduce="mean",
             ),
+            "ball_cone_clearance_cost": MetricsTermCfg(
+                func=microduck_mdp.slalom_ball_clearance_cost,
+                params={
+                    "command_name": "body_pose",
+                    "asset_name": "ball",
+                    "clearance_distance": SLALOM_BALL_CLEARANCE_DISTANCE,
+                },
+                reduce="mean",
+            ),
         }
     )
     for side in ("left", "right"):
@@ -259,36 +287,99 @@ def make_microduck_ball_slalom_env_cfg(
                 "stages": [
                     {
                         "step": 0,
+                        "active_waypoints": SLALOM_INITIAL_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_FULL_COURSE_START_PROBS,
                         "lateral_offset": SLALOM_INITIAL_LATERAL_OFFSET,
                         "goal_radius": SLALOM_INITIAL_GOAL_RADIUS,
                     },
                     {
                         "step": 1200 * 24,
+                        "active_waypoints": SLALOM_INITIAL_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_FULL_COURSE_START_PROBS,
                         "lateral_offset": SLALOM_SMALL_LATERAL_OFFSET,
                         "goal_radius": SLALOM_INITIAL_GOAL_RADIUS,
                     },
                     {
                         "step": 2200 * 24,
+                        "active_waypoints": SLALOM_INITIAL_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_FULL_COURSE_START_PROBS,
                         "lateral_offset": SLALOM_INTERMEDIATE_LATERAL_OFFSET,
                         "goal_radius": SLALOM_INITIAL_GOAL_RADIUS,
                     },
                     {
                         "step": 3200 * 24,
+                        "active_waypoints": SLALOM_INITIAL_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_FULL_COURSE_START_PROBS,
                         "lateral_offset": SLALOM_LARGE_LATERAL_OFFSET,
                         "goal_radius": SLALOM_INITIAL_GOAL_RADIUS,
                     },
                     {
                         "step": 4200 * 24,
+                        "active_waypoints": SLALOM_INITIAL_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_FULL_COURSE_START_PROBS,
                         "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
                         "goal_radius": SLALOM_INITIAL_GOAL_RADIUS,
                     },
                     {
                         "step": 5000 * 24,
+                        "active_waypoints": SLALOM_INITIAL_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_FULL_COURSE_START_PROBS,
                         "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
                         "goal_radius": SLALOM_MEDIUM_GOAL_RADIUS,
                     },
                     {
                         "step": 6000 * 24,
+                        "active_waypoints": SLALOM_INITIAL_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_FULL_COURSE_START_PROBS,
+                        "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
+                        "goal_radius": SLALOM_GOAL_RADIUS,
+                    },
+                    {
+                        "step": 10250 * 24,
+                        "active_waypoints": SLALOM_INTERMEDIATE_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_FULL_COURSE_START_PROBS,
+                        "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
+                        "goal_radius": SLALOM_MEDIUM_GOAL_RADIUS,
+                    },
+                    {
+                        "step": 10750 * 24,
+                        "active_waypoints": SLALOM_INTERMEDIATE_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_FULL_COURSE_START_PROBS,
+                        "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
+                        "goal_radius": SLALOM_GOAL_RADIUS,
+                    },
+                    {
+                        "step": 11000 * 24,
+                        "active_waypoints": SLALOM_FINAL_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_FULL_COURSE_START_PROBS,
+                        "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
+                        "goal_radius": SLALOM_MEDIUM_GOAL_RADIUS,
+                    },
+                    {
+                        "step": 12000 * 24,
+                        "active_waypoints": SLALOM_FINAL_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_FULL_COURSE_START_PROBS,
+                        "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
+                        "goal_radius": SLALOM_GOAL_RADIUS,
+                    },
+                    {
+                        "step": 13000 * 24,
+                        "active_waypoints": SLALOM_FINAL_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_TAIL_HEAVY_START_PROBS,
+                        "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
+                        "goal_radius": SLALOM_GOAL_RADIUS,
+                    },
+                    {
+                        "step": 13750 * 24,
+                        "active_waypoints": SLALOM_FINAL_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_TAIL_BALANCED_START_PROBS,
+                        "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
+                        "goal_radius": SLALOM_GOAL_RADIUS,
+                    },
+                    {
+                        "step": 14250 * 24,
+                        "active_waypoints": SLALOM_FINAL_WAYPOINTS,
+                        "start_waypoint_probs": SLALOM_FULL_COURSE_START_PROBS,
                         "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
                         "goal_radius": SLALOM_GOAL_RADIUS,
                     },
@@ -334,7 +425,7 @@ def make_microduck_ball_slalom_env_cfg(
 MicroduckBallSlalomRlCfg = deepcopy(MicroduckBallDribbleRlCfg)
 MicroduckBallSlalomRlCfg.experiment_name = "ball_slalom"
 MicroduckBallSlalomRlCfg.run_name = "ball_slalom"
-MicroduckBallSlalomRlCfg.max_iterations = 7_500
+MicroduckBallSlalomRlCfg.max_iterations = 15_000
 MicroduckBallSlalomRlCfg.algorithm.entropy_coef = SLALOM_ENTROPY_COEF
 MicroduckBallSlalomRlCfg.algorithm.learning_rate = SLALOM_LEARNING_RATE
 MicroduckBallSlalomRlCfg.algorithm.schedule = "fixed"

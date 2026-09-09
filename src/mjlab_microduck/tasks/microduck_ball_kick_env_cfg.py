@@ -36,6 +36,8 @@ at the same relative strength.
 import math
 from copy import deepcopy
 
+import mujoco
+
 # ── Kicking foot: "right" or "left" ───────────────────────────────────────────
 # Flips the ball spawn side and the support-foot (anti-hop) sensor. Everything
 # else is left/right symmetric (HOME pose has mirrored signs). Train the two
@@ -135,15 +137,47 @@ from mjlab.rl import (
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
+from mjlab.utils import spec_config as spec_cfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from mjlab_microduck.robot.microduck_constants import (
     MICRODUCK_BALL_CFG,
+    MICRODUCK_GRASS_PITCH_TEXTURE,
     MICRODUCK_STANDUP_ROBOT_CFG,
 )
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_velocity_env_cfg import HEAD_BODY_NAMES
 from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg, SYMMETRY_CFG
+
+
+class _BallFieldTextureCfg(spec_cfg.TextureCfg):
+    """Load the project turf image through MuJoCo's file-texture API."""
+
+    def edit_spec(self, spec: mujoco.MjSpec) -> None:
+        spec.add_texture(
+            name="groundplane",
+            type=mujoco.mjtTexture.mjTEXTURE_2D,
+            file=str(MICRODUCK_GRASS_PITCH_TEXTURE),
+        )
+
+
+BALL_FIELD_TEXTURE = _BallFieldTextureCfg(
+    name="groundplane",
+    type="2d",
+    builtin="none",
+    rgb1=(1.0, 1.0, 1.0),
+    rgb2=(1.0, 1.0, 1.0),
+    width=1,
+    height=1,
+)
+BALL_FIELD_MATERIAL = spec_cfg.MaterialCfg(
+    name="groundplane",
+    texuniform=True,
+    texrepeat=(1.0, 1.0),
+    reflectance=0.0,
+    texture="groundplane",
+    geom_names_expr=("terrain$",),
+)
 
 
 def _make_microduck_ball_kick_base_env_cfg(
@@ -209,6 +243,8 @@ def _make_microduck_ball_kick_base_env_cfg(
         "robot": MICRODUCK_STANDUP_ROBOT_CFG,
         "ball":  MICRODUCK_BALL_CFG,
     }
+    cfg.scene.terrain.textures = (BALL_FIELD_TEXTURE,)
+    cfg.scene.terrain.materials = (BALL_FIELD_MATERIAL,)
     cfg.scene.sensors = (feet_ground_cfg, support_foot_ground_cfg, self_collision_cfg)
     cfg.viewer.body_name = "trunk_base"
 

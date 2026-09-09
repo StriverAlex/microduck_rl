@@ -127,6 +127,8 @@ def test_generalization_scenario_rebuilds_the_physical_course_and_contact_matche
 
     command = cfg.commands["body_pose"]
     assert command.cone_x == scenario.cone_x
+    assert command.active_waypoints == len(scenario.cone_x)
+    assert command.start_waypoint_probs == (1.0, 0.0, 0.0, 0.0, 0.0)
     assert command.lateral_offset == scenario.lateral_offset
     assert cfg.episode_length_s == scenario.episode_length_s
     assert command.resampling_time_range == (48.0, 48.0)

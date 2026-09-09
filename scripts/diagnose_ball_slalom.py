@@ -795,7 +795,7 @@ def run_diagnosis(
     env_cfg = configure_diagnostic_env_cfg(
         load_env_cfg(TASK_ID), seed=seed, scenario=scenario
     )
-    total_waypoints = len(env_cfg.commands["body_pose"].cone_x)
+    total_waypoints = env_cfg.commands["body_pose"].active_waypoints
     ball_lost_params = env_cfg.terminations["ball_lost"].params
     ball_lost_thresholds = BallLostThresholds(
         min_forward=float(ball_lost_params["min_forward"]),

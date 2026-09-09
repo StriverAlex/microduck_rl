@@ -28,7 +28,9 @@ def _slalom_term() -> mdp.BallSlalomCommand:
         step_dt=0.02,
     )
     term.cfg = SimpleNamespace(
-        cone_x=(0.45, 0.90, 1.35),
+        cone_x=(0.45, 0.90, 1.35, 1.80, 2.25),
+        active_waypoints=3,
+        start_waypoint_probs=(1.0, 0.0, 0.0, 0.0, 0.0),
         lateral_offset=0.16,
         waypoint_clearance=0.04,
         route_lateral_margin=0.06,
@@ -50,6 +52,7 @@ def _slalom_term() -> mdp.BallSlalomCommand:
     term._command = torch.zeros(1, 6)
     term._target_pos_w = torch.zeros(1, 2)
     term._start_ball_pos_w = torch.zeros(1, 2)
+    term._course_origin_w = torch.zeros(1, 2)
     term._initial_direction_w = torch.zeros(1, 2)
     term._direction_w = torch.tensor([[1.0, 0.0]])
     term._distance = torch.full((1,), torch.inf)
@@ -57,8 +60,10 @@ def _slalom_term() -> mdp.BallSlalomCommand:
     term._sample_distance = torch.zeros(1)
     term._target_epoch = torch.zeros(1, dtype=torch.long)
     term._pending = torch.ones(1, dtype=torch.bool)
-    term._waypoint_pos_w = torch.zeros(1, 3, 2)
+    term._waypoint_pos_w = torch.zeros(1, 5, 2)
     term._waypoint_index = torch.zeros(1, dtype=torch.long)
+    term._start_waypoint_index = torch.zeros(1, dtype=torch.long)
+    term._total_waypoints = torch.full((1,), 3, dtype=torch.long)
     term._course_side = torch.ones(1)
     term._completed = torch.zeros(1, dtype=torch.bool)
     term._invalid = torch.zeros(1, dtype=torch.bool)
@@ -79,12 +84,15 @@ def test_slalom_waypoints_alternate_and_course_is_anchored_to_ball():
                 [0.59, 0.16],
                 [1.04, -0.16],
                 [1.49, 0.16],
+                [1.94, -0.16],
+                [2.39, 0.16],
             ]
         ),
     )
     pose, env_ids = term._course.last_pose
     assert torch.equal(env_ids, torch.tensor([0]))
     assert torch.allclose(pose, torch.tensor([[0.10, 0.00, 0.00, 1, 0, 0, 0]]))
+    assert torch.allclose(term.current_cone_pos_w, torch.tensor([[0.55, 0.00]]))
 
 
 def test_slalom_command_exposes_ball_position_in_mirror_compatible_slots():
@@ -118,17 +126,27 @@ def test_slalom_next_turn_is_zero_on_the_final_waypoint():
     assert term.command[0, 5].item() == 0.0
 
 
-def test_slalom_direction_previews_the_following_segment_near_a_waypoint():
+def test_slalom_direction_does_not_preview_before_passing_the_cone():
     term = _slalom_term()
     term._update_command()
-    far_direction = term.direction_w[0].clone()
 
     target = term.target_pos_w[0]
-    term._ball.data.root_link_pos_w[0, :2] = target - 0.09 * far_direction
+    term._ball.data.root_link_pos_w[0, :2] = torch.tensor([0.54, target[1]])
     term._update_command()
 
     assert term.waypoint_index.item() == 0
-    assert term.direction_w[0, 1] < far_direction[1]
+    assert torch.allclose(term.direction_w[0], torch.tensor([1.0, 0.0]))
+
+
+def test_slalom_direction_previews_after_passing_the_cone():
+    term = _slalom_term()
+    term._update_command()
+    term._ball.data.root_link_pos_w[0, :2] = torch.tensor([0.56, 0.16])
+
+    term._update_command()
+
+    assert term.waypoint_index.item() == 0
+    assert term.direction_w[0, 1] < 0.0
 
 
 def test_slalom_advances_in_order_and_finishes_after_the_last_cone():
@@ -181,6 +199,55 @@ def test_slalom_always_requires_all_three_waypoints():
 
     assert not term.completed.item()
     assert term.waypoint_index.item() == 1
+
+
+def test_slalom_resample_latches_the_curriculum_waypoint_count():
+    term = _slalom_term()
+    term.cfg.active_waypoints = 5
+
+    term._resample_command(torch.tensor([0]))
+
+    assert term.total_waypoints.item() == 5
+    term.cfg.active_waypoints = 4
+    assert term.total_waypoints.item() == 5
+
+    term._resample_command(torch.tensor([0]))
+    assert term.total_waypoints.item() == 4
+
+
+def test_slalom_resample_latches_a_reverse_curriculum_start():
+    term = _slalom_term()
+    term.cfg.active_waypoints = 5
+    term.cfg.start_waypoint_probs = (0.0, 0.0, 0.0, 1.0, 0.0)
+
+    term._resample_command(torch.tensor([0]))
+
+    assert term.start_waypoint_index.item() == 3
+    assert term.waypoint_index.item() == 3
+    term.cfg.start_waypoint_probs = (1.0, 0.0, 0.0, 0.0, 0.0)
+    assert term.start_waypoint_index.item() == 3
+
+
+def test_reverse_curriculum_moves_the_course_to_start_at_a_later_segment():
+    term = _slalom_term()
+    term.cfg.active_waypoints = 5
+    term.cfg.start_waypoint_probs = (0.0, 0.0, 0.0, 1.0, 0.0)
+    term._resample_command(torch.tensor([0]))
+    term._course_side[:] = 1.0
+
+    term._update_command()
+
+    assert torch.allclose(term.target_pos_w, torch.tensor([[0.55, -0.32]]))
+    assert torch.allclose(term._waypoint_pos_w[0, 2], torch.tensor([0.10, 0.00]))
+    pose, env_ids = term._course.last_pose
+    assert torch.equal(env_ids, torch.tensor([0]))
+    assert torch.allclose(
+        pose, torch.tensor([[-1.29, -0.16, 0.00, 1, 0, 0, 0]])
+    )
+    assert torch.isclose(
+        term.initial_distance,
+        torch.tensor([2.0 * (0.45**2 + 0.32**2) ** 0.5]),
+    )
 
 
 def test_waypoint_epoch_change_cannot_create_progress_reward(monkeypatch):
@@ -244,6 +311,33 @@ def test_ball_control_distance_cost_is_zero_inside_and_linear_outside(monkeypatc
     assert torch.allclose(value, torch.tensor([0.0, 0.2]))
 
 
+def test_slalom_ball_clearance_cost_is_nonnegative_and_zero_after_completion():
+    term = _slalom_term()
+    term._update_command()
+    ball = term._ball
+    env = SimpleNamespace(
+        scene={"ball": ball},
+        command_manager=SimpleNamespace(get_term=lambda name: term),
+    )
+
+    ball.data.root_link_pos_w[0, :2] = term.current_cone_pos_w + torch.tensor(
+        [[0.08, 0.0]]
+    )
+    assert torch.allclose(
+        mdp.slalom_ball_clearance_cost(env, clearance_distance=0.10),
+        torch.tensor([0.20]),
+    )
+
+    ball.data.root_link_pos_w[0, :2] = term.current_cone_pos_w + torch.tensor(
+        [[0.12, 0.0]]
+    )
+    assert mdp.slalom_ball_clearance_cost(env, clearance_distance=0.10).item() == 0.0
+
+    term._completed[:] = True
+    ball.data.root_link_pos_w[0, :2] = term.current_cone_pos_w
+    assert mdp.slalom_ball_clearance_cost(env, clearance_distance=0.10).item() == 0.0
+
+
 def test_slalom_metrics_report_ordered_completion_and_side_mass():
     term = _slalom_term()
     term._waypoint_index[:] = 2
@@ -266,6 +360,23 @@ def test_slalom_metrics_report_ordered_completion_and_side_mass():
     assert mdp.ball_slalom_success(env).item() == 0.0
 
 
+def test_slalom_metrics_count_only_the_sampled_course_suffix():
+    term = _slalom_term()
+    term._total_waypoints[:] = 5
+    term._start_waypoint_index[:] = 3
+    term._waypoint_index[:] = 4
+    env = SimpleNamespace(
+        command_manager=SimpleNamespace(get_term=lambda name: term),
+        termination_manager=SimpleNamespace(terminated=torch.tensor([False])),
+    )
+
+    assert mdp.ball_slalom_waypoints_completed(env).item() == 1.0
+    assert mdp.ball_slalom_course_completion(env).item() == 0.5
+    term._completed[:] = True
+    assert mdp.ball_slalom_waypoints_completed(env).item() == 2.0
+    assert mdp.ball_slalom_course_completion(env).item() == 1.0
+
+
 def test_slalom_curriculum_updates_goal_radius_with_course_geometry():
     term = _slalom_term()
     env = SimpleNamespace(
@@ -275,11 +386,15 @@ def test_slalom_curriculum_updates_goal_radius_with_course_geometry():
     stages = [
         {
             "step": 0,
+            "active_waypoints": 3,
+            "start_waypoint_probs": (1.0, 0.0, 0.0, 0.0, 0.0),
             "lateral_offset": 0.08,
             "goal_radius": 0.15,
         },
         {
             "step": 7200,
+            "active_waypoints": 4,
+            "start_waypoint_probs": (0.5, 0.0, 0.25, 0.25, 0.0),
             "lateral_offset": 0.12,
             "goal_radius": 0.12,
         },
@@ -289,6 +404,8 @@ def test_slalom_curriculum_updates_goal_radius_with_course_geometry():
         env, torch.tensor([0]), command_name="body_pose", stages=stages
     )
 
-    assert torch.isclose(value, torch.tensor(0.12))
+    assert torch.isclose(value, torch.tensor(4.0))
     assert term.cfg.lateral_offset == 0.12
     assert term.cfg.goal_radius == 0.12
+    assert term.cfg.active_waypoints == 4
+    assert term.cfg.start_waypoint_probs == (0.5, 0.0, 0.25, 0.25, 0.0)

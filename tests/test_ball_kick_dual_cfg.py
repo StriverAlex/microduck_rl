@@ -1,7 +1,11 @@
+import mujoco
+
 from mjlab.tasks.registry import list_tasks
 
+from mjlab_microduck.robot.microduck_constants import MICRODUCK_BALL_XML
 from mjlab_microduck.tasks import mdp
 from mjlab_microduck.tasks.microduck_ball_kick_env_cfg import (
+    BALL_FIELD_TEXTURE,
     BALL_OFFSET_ABS_Y,
     BALL_OFFSET_X,
     BALL_POS_NOISE_XY,
@@ -26,6 +30,28 @@ from mjlab_microduck.tasks.microduck_ball_kick_env_cfg import (
 
 def _sensor(cfg, name):
     return next(sensor for sensor in cfg.scene.sensors if sensor.name == name)
+
+
+def test_ball_tasks_use_green_field_and_soccer_ball_without_physics_changes():
+    cfg = make_microduck_ball_kick_dual_env_cfg()
+    texture = cfg.scene.terrain.textures[0]
+    material = cfg.scene.terrain.materials[0]
+    assert texture is BALL_FIELD_TEXTURE
+    assert material.texture == "groundplane"
+    assert material.texrepeat == (1.0, 1.0)
+    assert material.reflectance == 0.0
+
+    model = mujoco.MjSpec.from_file(str(MICRODUCK_BALL_XML)).compile()
+    geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "ball_geom")
+    body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "ball")
+    material_id = model.geom_matid[geom_id]
+    assert model.ntex == 1
+    assert model.geom_size[geom_id, 0] == 0.035
+    assert tuple(model.geom_friction[geom_id]) == (0.5, 0.005, 0.0001)
+    assert model.body_mass[body_id] == 0.015
+    assert material_id >= 0
+    assert model.mat_texuniform[material_id] == 0
+    assert 0 in model.mat_texid[material_id]
 
 
 def test_fixed_foot_ball_kick_behavior_is_unchanged():

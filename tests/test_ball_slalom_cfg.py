@@ -11,30 +11,38 @@ from mjlab_microduck.tasks.microduck_ball_dribble_env_cfg import (
     make_microduck_ball_dribble_env_cfg,
 )
 from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
+    SLALOM_BALL_CLEARANCE_COST_WEIGHT,
+    SLALOM_BALL_CLEARANCE_DISTANCE,
     SLALOM_COM_RANDOMIZATION_RANGE,
     SLALOM_CONE_X,
     SLALOM_CONTROL_DISTANCE_COST_WEIGHT,
     SLALOM_ENTROPY_COEF,
     SLALOM_EPISODE_LENGTH_S,
     SLALOM_FINAL_LATERAL_OFFSET,
+    SLALOM_FINAL_WAYPOINTS,
+    SLALOM_FULL_COURSE_START_PROBS,
     SLALOM_GOAL_RADIUS,
     SLALOM_HEAD_COM_RANDOMIZATION_RANGE,
     SLALOM_INITIAL_GOAL_RADIUS,
     SLALOM_INITIAL_LATERAL_OFFSET,
     SLALOM_INITIAL_PROGRESS_REWARD_WEIGHT,
     SLALOM_INITIAL_TERMINATION_COST_WEIGHT,
+    SLALOM_INITIAL_WAYPOINTS,
     SLALOM_INTERMEDIATE_LATERAL_OFFSET,
+    SLALOM_INTERMEDIATE_WAYPOINTS,
     SLALOM_LARGE_LATERAL_OFFSET,
     SLALOM_LEARNING_RATE,
     SLALOM_MEDIUM_GOAL_RADIUS,
     SLALOM_MIN_BALL_FORWARD,
     SLALOM_OBSTACLE_COST_WEIGHT,
-    SLALOM_PROGRESS_REWARD_WEIGHT,
     SLALOM_PREVIEW_DISTANCE,
+    SLALOM_PROGRESS_REWARD_WEIGHT,
     SLALOM_PUSH_RANGE,
     SLALOM_ROUTE_LATERAL_MARGIN,
     SLALOM_SMALL_LATERAL_OFFSET,
     SLALOM_SUCCESS_REWARD_WEIGHT,
+    SLALOM_TAIL_BALANCED_START_PROBS,
+    SLALOM_TAIL_HEAVY_START_PROBS,
     SLALOM_TERMINATION_COST_WEIGHT,
     SLALOM_WAYPOINT_CLEARANCE,
     MicroduckBallSlalomRlCfg,
@@ -42,7 +50,7 @@ from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
 )
 
 
-def test_slalom_course_asset_contains_three_physical_markers():
+def test_slalom_course_asset_contains_five_physical_markers():
     course = MICRODUCK_SLALOM_COURSE_CFG.build()
 
     assert course.is_fixed_base
@@ -51,13 +59,15 @@ def test_slalom_course_asset_contains_three_physical_markers():
         "slalom_cone_1",
         "slalom_cone_2",
         "slalom_cone_3",
+        "slalom_cone_4",
+        "slalom_cone_5",
     )
     assert (
-        tuple(course.spec.geom(f"slalom_cone_{index}").pos[0] for index in range(1, 4))
+        tuple(course.spec.geom(f"slalom_cone_{index}").pos[0] for index in range(1, 6))
         == SLALOM_CONE_X
     )
     assert all(
-        next_x - current_x >= 0.45
+        round(next_x - current_x, 2) >= 0.45
         for current_x, next_x in zip(SLALOM_CONE_X, SLALOM_CONE_X[1:])
     )
 
@@ -88,6 +98,8 @@ def test_slalom_command_and_curriculum_reach_the_complete_course():
     assert command.preview_distance == SLALOM_PREVIEW_DISTANCE
     assert SLALOM_PREVIEW_DISTANCE == 0.40
     assert command.route_lateral_margin == SLALOM_ROUTE_LATERAL_MARGIN
+    assert command.active_waypoints == SLALOM_INITIAL_WAYPOINTS
+    assert command.start_waypoint_probs == SLALOM_FULL_COURSE_START_PROBS
     assert command.lateral_offset == SLALOM_INITIAL_LATERAL_OFFSET
     assert command.distance_scale == DRIBBLE_TARGET_DISTANCE_SCALE
     assert command.ball_position_scale == DRIBBLE_CONTROL_RADIUS
@@ -96,18 +108,111 @@ def test_slalom_command_and_curriculum_reach_the_complete_course():
     assert [
         (
             stage["step"],
+            stage["active_waypoints"],
+            stage["start_waypoint_probs"],
             stage["lateral_offset"],
             stage["goal_radius"],
         )
         for stage in stages
     ] == [
-        (0, SLALOM_INITIAL_LATERAL_OFFSET, SLALOM_INITIAL_GOAL_RADIUS),
-        (1200 * 24, SLALOM_SMALL_LATERAL_OFFSET, SLALOM_INITIAL_GOAL_RADIUS),
-        (2200 * 24, SLALOM_INTERMEDIATE_LATERAL_OFFSET, SLALOM_INITIAL_GOAL_RADIUS),
-        (3200 * 24, SLALOM_LARGE_LATERAL_OFFSET, SLALOM_INITIAL_GOAL_RADIUS),
-        (4200 * 24, SLALOM_FINAL_LATERAL_OFFSET, SLALOM_INITIAL_GOAL_RADIUS),
-        (5000 * 24, SLALOM_FINAL_LATERAL_OFFSET, SLALOM_MEDIUM_GOAL_RADIUS),
-        (6000 * 24, SLALOM_FINAL_LATERAL_OFFSET, SLALOM_GOAL_RADIUS),
+        (
+            0,
+            SLALOM_INITIAL_WAYPOINTS,
+            SLALOM_FULL_COURSE_START_PROBS,
+            SLALOM_INITIAL_LATERAL_OFFSET,
+            SLALOM_INITIAL_GOAL_RADIUS,
+        ),
+        (
+            1200 * 24,
+            SLALOM_INITIAL_WAYPOINTS,
+            SLALOM_FULL_COURSE_START_PROBS,
+            SLALOM_SMALL_LATERAL_OFFSET,
+            SLALOM_INITIAL_GOAL_RADIUS,
+        ),
+        (
+            2200 * 24,
+            SLALOM_INITIAL_WAYPOINTS,
+            SLALOM_FULL_COURSE_START_PROBS,
+            SLALOM_INTERMEDIATE_LATERAL_OFFSET,
+            SLALOM_INITIAL_GOAL_RADIUS,
+        ),
+        (
+            3200 * 24,
+            SLALOM_INITIAL_WAYPOINTS,
+            SLALOM_FULL_COURSE_START_PROBS,
+            SLALOM_LARGE_LATERAL_OFFSET,
+            SLALOM_INITIAL_GOAL_RADIUS,
+        ),
+        (
+            4200 * 24,
+            SLALOM_INITIAL_WAYPOINTS,
+            SLALOM_FULL_COURSE_START_PROBS,
+            SLALOM_FINAL_LATERAL_OFFSET,
+            SLALOM_INITIAL_GOAL_RADIUS,
+        ),
+        (
+            5000 * 24,
+            SLALOM_INITIAL_WAYPOINTS,
+            SLALOM_FULL_COURSE_START_PROBS,
+            SLALOM_FINAL_LATERAL_OFFSET,
+            SLALOM_MEDIUM_GOAL_RADIUS,
+        ),
+        (
+            6000 * 24,
+            SLALOM_INITIAL_WAYPOINTS,
+            SLALOM_FULL_COURSE_START_PROBS,
+            SLALOM_FINAL_LATERAL_OFFSET,
+            SLALOM_GOAL_RADIUS,
+        ),
+        (
+            10250 * 24,
+            SLALOM_INTERMEDIATE_WAYPOINTS,
+            SLALOM_FULL_COURSE_START_PROBS,
+            SLALOM_FINAL_LATERAL_OFFSET,
+            SLALOM_MEDIUM_GOAL_RADIUS,
+        ),
+        (
+            10750 * 24,
+            SLALOM_INTERMEDIATE_WAYPOINTS,
+            SLALOM_FULL_COURSE_START_PROBS,
+            SLALOM_FINAL_LATERAL_OFFSET,
+            SLALOM_GOAL_RADIUS,
+        ),
+        (
+            11000 * 24,
+            SLALOM_FINAL_WAYPOINTS,
+            SLALOM_FULL_COURSE_START_PROBS,
+            SLALOM_FINAL_LATERAL_OFFSET,
+            SLALOM_MEDIUM_GOAL_RADIUS,
+        ),
+        (
+            12000 * 24,
+            SLALOM_FINAL_WAYPOINTS,
+            SLALOM_FULL_COURSE_START_PROBS,
+            SLALOM_FINAL_LATERAL_OFFSET,
+            SLALOM_GOAL_RADIUS,
+        ),
+        (
+            13000 * 24,
+            SLALOM_FINAL_WAYPOINTS,
+            SLALOM_TAIL_HEAVY_START_PROBS,
+            SLALOM_FINAL_LATERAL_OFFSET,
+            SLALOM_GOAL_RADIUS,
+        ),
+        (
+            13750 * 24,
+            SLALOM_FINAL_WAYPOINTS,
+            SLALOM_TAIL_BALANCED_START_PROBS,
+            SLALOM_FINAL_LATERAL_OFFSET,
+            SLALOM_GOAL_RADIUS,
+        ),
+        (
+            14250 * 24,
+            SLALOM_FINAL_WAYPOINTS,
+            SLALOM_FULL_COURSE_START_PROBS,
+            SLALOM_FINAL_LATERAL_OFFSET,
+            SLALOM_GOAL_RADIUS,
+        ),
     ]
     assert "target_range" not in cfg.curriculum
     assert "com_range" not in cfg.curriculum
@@ -172,11 +277,13 @@ def test_straight_waypoint_segments_clear_each_cone_by_the_route_margin():
         assert expected_side * crossing_y >= SLALOM_ROUTE_LATERAL_MARGIN
 
 
-def test_slalom_play_uses_three_cones_without_training_curricula_or_pushes():
+def test_slalom_play_uses_five_cones_without_training_curricula_or_pushes():
     cfg = make_microduck_ball_slalom_env_cfg(play=True)
     command = cfg.commands["body_pose"]
 
     assert command.waypoint_clearance == SLALOM_WAYPOINT_CLEARANCE
+    assert command.active_waypoints == SLALOM_FINAL_WAYPOINTS
+    assert command.start_waypoint_probs == SLALOM_FULL_COURSE_START_PROBS
     assert command.lateral_offset == SLALOM_FINAL_LATERAL_OFFSET
     assert "slalom_course" not in cfg.curriculum
     assert "slalom_progress_weight" not in cfg.curriculum
@@ -204,6 +311,24 @@ def test_slalom_obstacle_contact_is_a_nonnegative_cost_with_negative_weight():
     for sensor in cfg.scene.sensors:
         if sensor.name in {"ball_marker_contact", "robot_marker_contact"}:
             assert sensor.history_length == cfg.decimation
+
+
+def test_slalom_ball_clearance_is_a_nonnegative_cost_with_negative_weight():
+    cfg = make_microduck_ball_slalom_env_cfg()
+    cost = cfg.rewards["ball_cone_clearance"]
+
+    assert cost.func is mdp.slalom_ball_clearance_cost
+    assert cost.weight == SLALOM_BALL_CLEARANCE_COST_WEIGHT
+    assert cost.weight < 0.0
+    assert cost.params == {
+        "command_name": "body_pose",
+        "asset_name": "ball",
+        "clearance_distance": SLALOM_BALL_CLEARANCE_DISTANCE,
+    }
+    metric = cfg.metrics["ball_cone_clearance_cost"]
+    assert metric.func is mdp.slalom_ball_clearance_cost
+    assert metric.params == cost.params
+    assert metric.reduce == "mean"
 
 
 def test_slalom_uses_official_failure_termination_cost():
@@ -261,7 +386,7 @@ def test_only_base_slalom_task_is_registered():
     assert "Mjlab-BallSlalom-Flat-Backlash-MicroDuck" not in tasks
     assert MicroduckBallSlalomRlCfg.algorithm.symmetry_cfg["use_mirror_loss"] is True
     assert MicroduckBallSlalomRlCfg.experiment_name == "ball_slalom"
-    assert MicroduckBallSlalomRlCfg.max_iterations == 7_500
+    assert MicroduckBallSlalomRlCfg.max_iterations == 15_000
     assert MicroduckBallSlalomRlCfg.algorithm.entropy_coef == SLALOM_ENTROPY_COEF
     assert MicroduckBallSlalomRlCfg.algorithm.learning_rate == SLALOM_LEARNING_RATE
     assert MicroduckBallSlalomRlCfg.algorithm.schedule == "fixed"

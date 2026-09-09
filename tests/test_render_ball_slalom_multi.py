@@ -7,6 +7,7 @@ import pytest
 from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
     make_microduck_ball_slalom_env_cfg,
 )
+from mjlab_microduck.tasks.microduck_ball_kick_env_cfg import BALL_FIELD_TEXTURE
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
@@ -36,6 +37,9 @@ def test_multi_env_replay_cfg_uses_irregular_course_and_world_camera():
     assert cfg.viewer.body_name is None
     assert cfg.viewer.max_extra_envs == 7
     assert (cfg.viewer.width, cfg.viewer.height) == (1280, 720)
+    assert cfg.scene.terrain.textures[0] is BALL_FIELD_TEXTURE
+    assert cfg.scene.terrain.materials[0].texrepeat == (1.0, 1.0)
+    assert cfg.scene.terrain.materials[0].reflectance == 0.0
 
 
 def test_multi_env_replay_requires_more_than_one_environment():

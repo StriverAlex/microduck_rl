@@ -25,7 +25,9 @@ MICRODUCK_GROUNDCONTACT_XML: Path = _ROBOT_DIR / "robot_groundcontact.xml"
 MICRODUCK_ALLCOLLISIONS_XML: Path = _ROBOT_DIR / "robot_allcollisions.xml"
 # 70mm / 15g ball prop for the BallKick task.
 MICRODUCK_BALL_XML: Path = _ROBOT_DIR / "ball.xml"
-# Three fixed markers used by the ball-slalom course.
+# Photorealistic alternating-mow turf used by the ball-task ground plane.
+MICRODUCK_GRASS_PITCH_TEXTURE: Path = _ROBOT_DIR / "grass_pitch_texture.png"
+# Five fixed markers used by the ball-slalom course.
 MICRODUCK_SLALOM_COURSE_XML: Path = _ROBOT_DIR / "slalom_course.xml"
 # Roller-skate model: 14 actuated joints + passive wheel hinges (passive_*wheel).
 MICRODUCK_GROUNDCONTACT_ROLLERS_XML: Path = _ROBOT_DIR / "robot_groundcontact_rollers.xml"
@@ -40,6 +42,9 @@ assert MICRODUCK_WALK_XML.exists(), f"XML not found: {MICRODUCK_WALK_XML}"
 assert MICRODUCK_GROUNDCONTACT_XML.exists(), f"XML not found: {MICRODUCK_GROUNDCONTACT_XML}"
 assert MICRODUCK_ALLCOLLISIONS_XML.exists(), f"XML not found: {MICRODUCK_ALLCOLLISIONS_XML}"
 assert MICRODUCK_BALL_XML.exists(), f"XML not found: {MICRODUCK_BALL_XML}"
+assert MICRODUCK_GRASS_PITCH_TEXTURE.exists(), (
+    f"Texture not found: {MICRODUCK_GRASS_PITCH_TEXTURE}"
+)
 assert MICRODUCK_SLALOM_COURSE_XML.exists(), f"XML not found: {MICRODUCK_SLALOM_COURSE_XML}"
 assert MICRODUCK_GROUNDCONTACT_ROLLERS_XML.exists(), f"XML not found: {MICRODUCK_GROUNDCONTACT_ROLLERS_XML}"
 assert MICRODUCK_GROUNDCONTACT_BACKLASH_XML.exists(), f"XML not found: {MICRODUCK_GROUNDCONTACT_BACKLASH_XML}"

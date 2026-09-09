@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="512" viewBox="0 0 1024 512">
+  <rect width="1024" height="512" fill="#f3f3ee"/>
+  <defs>
+    <g id="patch">
+      <polygon points="0,-42 40,-13 25,34 -25,34 -40,-13" fill="#111111"/>
+      <polygon points="0,-58 55,-18 34,47 -34,47 -55,-18"
+               fill="none" stroke="#b8b8b2" stroke-width="4"/>
+    </g>
+  </defs>
+  <g>
+    <use href="#patch" transform="translate(128 64) scale(.72)"/>
+    <use href="#patch" transform="translate(384 64) scale(.72)"/>
+    <use href="#patch" transform="translate(640 64) scale(.72)"/>
+    <use href="#patch" transform="translate(896 64) scale(.72)"/>
+    <use href="#patch" transform="translate(0 192) scale(.9)"/>
+    <use href="#patch" transform="translate(256 192) scale(.9)"/>
+    <use href="#patch" transform="translate(512 192) scale(.9)"/>
+    <use href="#patch" transform="translate(768 192) scale(.9)"/>
+    <use href="#patch" transform="translate(1024 192) scale(.9)"/>
+    <use href="#patch" transform="translate(128 320) scale(.9)"/>
+    <use href="#patch" transform="translate(384 320) scale(.9)"/>
+    <use href="#patch" transform="translate(640 320) scale(.9)"/>
+    <use href="#patch" transform="translate(896 320) scale(.9)"/>
+    <use href="#patch" transform="translate(0 448) scale(.72)"/>
+    <use href="#patch" transform="translate(256 448) scale(.72)"/>
+    <use href="#patch" transform="translate(512 448) scale(.72)"/>
+    <use href="#patch" transform="translate(768 448) scale(.72)"/>
+    <use href="#patch" transform="translate(1024 448) scale(.72)"/>
+  </g>
+</svg>

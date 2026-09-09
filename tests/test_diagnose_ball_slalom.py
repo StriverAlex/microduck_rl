@@ -116,6 +116,7 @@ def test_diagnostic_cfg_freezes_final_course_and_keeps_full_dr():
     assert not cfg.auto_reset
     assert command.lateral_offset == SLALOM_FINAL_LATERAL_OFFSET
     assert command.goal_radius == SLALOM_GOAL_RADIUS
+    assert command.active_waypoints == 3
     assert cfg.rewards["ball_target_progress"].weight == SLALOM_PROGRESS_REWARD_WEIGHT
     assert cfg.rewards["termination"].weight == SLALOM_TERMINATION_COST_WEIGHT
     assert cfg.curriculum == {}
@@ -147,6 +148,14 @@ def test_diagnostic_cfg_accepts_a_generalization_course():
     )
 
     assert cfg.commands["body_pose"].cone_x == scenario.cone_x
+    assert cfg.commands["body_pose"].active_waypoints == len(scenario.cone_x)
+    assert cfg.commands["body_pose"].start_waypoint_probs == (
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
     assert cfg.commands["body_pose"].lateral_offset == scenario.lateral_offset
     assert cfg.episode_length_s == scenario.episode_length_s
     assert cfg.scene.entities["slalom_course"].build().geom_names == tuple(

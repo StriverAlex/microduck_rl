@@ -104,6 +104,10 @@ def configure_slalom_scenario(
     )
     command = cfg.commands["body_pose"]
     command.cone_x = scenario.cone_x
+    command.active_waypoints = len(scenario.cone_x)
+    command.start_waypoint_probs = (1.0,) + (0.0,) * (
+        len(scenario.cone_x) - 1
+    )
     command.lateral_offset = scenario.lateral_offset
     cfg.episode_length_s = scenario.episode_length_s
     command_duration = (scenario.episode_length_s * 2,) * 2
@@ -290,6 +294,9 @@ def evaluate_checkpoint(
     env_cfg = load_env_cfg(TASK_ID)
     if scenario is None:
         env_cfg.commands["body_pose"].lateral_offset = SLALOM_FINAL_LATERAL_OFFSET
+        env_cfg.commands["body_pose"].active_waypoints = len(
+            env_cfg.commands["body_pose"].cone_x
+        )
     else:
         configure_slalom_scenario(env_cfg, scenario)
     env_cfg.commands["body_pose"].goal_radius = SLALOM_GOAL_RADIUS

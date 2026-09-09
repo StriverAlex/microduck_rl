@@ -5934,6 +5934,9 @@ class BallSlalomCommand(BallTargetCommand):
             raise ValueError("cone_x must contain positive positions")
         if any(b <= a for a, b in zip(cfg.cone_x, cfg.cone_x[1:])):
             raise ValueError("cone_x positions must be strictly increasing")
+        if not 0 < cfg.active_waypoints <= len(cfg.cone_x):
+            raise ValueError("active_waypoints must select a non-empty cone prefix")
+        self._validate_start_waypoint_probs()
         if cfg.lateral_offset < 0.0:
             raise ValueError("lateral_offset must be non-negative")
         if cfg.waypoint_clearance <= 0.0:
@@ -5956,6 +5959,15 @@ class BallSlalomCommand(BallTargetCommand):
         self._waypoint_index = torch.zeros(
             env.num_envs, device=env.device, dtype=torch.long
         )
+        self._start_waypoint_index = torch.zeros(
+            env.num_envs, device=env.device, dtype=torch.long
+        )
+        self._total_waypoints = torch.full(
+            (env.num_envs,),
+            cfg.active_waypoints,
+            device=env.device,
+            dtype=torch.long,
+        )
         self._course_side = torch.ones(env.num_envs, device=env.device)
         self._completed = torch.zeros(
             env.num_envs, device=env.device, dtype=torch.bool
@@ -5965,14 +5977,30 @@ class BallSlalomCommand(BallTargetCommand):
         )
         self._course_forward_w = torch.zeros(env.num_envs, 2, device=env.device)
         self._course_lateral_w = torch.zeros(env.num_envs, 2, device=env.device)
+        self._course_origin_w = torch.zeros(env.num_envs, 2, device=env.device)
+
+    def _validate_start_waypoint_probs(self) -> None:
+        probs = self.cfg.start_waypoint_probs
+        if len(probs) != len(self.cfg.cone_x):
+            raise ValueError("start_waypoint_probs must match cone_x length")
+        if any(probability < 0.0 for probability in probs):
+            raise ValueError("start_waypoint_probs must be non-negative")
+        if any(probs[self.cfg.active_waypoints :]):
+            raise ValueError("start_waypoint_probs cannot select inactive waypoints")
+        if not math.isclose(sum(probs), 1.0, abs_tol=1.0e-6):
+            raise ValueError("start_waypoint_probs must sum to one")
 
     @property
     def waypoint_index(self) -> torch.Tensor:
         return self._waypoint_index
 
     @property
+    def start_waypoint_index(self) -> torch.Tensor:
+        return self._start_waypoint_index
+
+    @property
     def total_waypoints(self) -> torch.Tensor:
-        return torch.full_like(self._waypoint_index, len(self.cfg.cone_x))
+        return self._total_waypoints
 
     @property
     def course_side(self) -> torch.Tensor:
@@ -5986,6 +6014,15 @@ class BallSlalomCommand(BallTargetCommand):
     def invalid(self) -> torch.Tensor:
         return self._invalid
 
+    @property
+    def current_cone_pos_w(self) -> torch.Tensor:
+        cone_x = torch.as_tensor(
+            self.cfg.cone_x,
+            device=self.device,
+            dtype=self._course_origin_w.dtype,
+        )[self._waypoint_index]
+        return self._course_origin_w + self._course_forward_w * cone_x[:, None]
+
     def _resample_command(self, env_ids: torch.Tensor) -> None:
         if len(env_ids) == 0:
             return
@@ -5994,7 +6031,18 @@ class BallSlalomCommand(BallTargetCommand):
             -1.0,
             1.0,
         )
-        self._waypoint_index[env_ids] = 0
+        self._validate_start_waypoint_probs()
+        probabilities = torch.tensor(
+            self.cfg.start_waypoint_probs,
+            device=self.device,
+            dtype=self._command.dtype,
+        )
+        start_waypoint = torch.multinomial(
+            probabilities, len(env_ids), replacement=True
+        )
+        self._waypoint_index[env_ids] = start_waypoint
+        self._start_waypoint_index[env_ids] = start_waypoint
+        self._total_waypoints[env_ids] = self.cfg.active_waypoints
         self._completed[env_ids] = False
         self._invalid[env_ids] = False
         self._pending[env_ids] = True
@@ -6030,7 +6078,23 @@ class BallSlalomCommand(BallTargetCommand):
                 * alternating[None, :]
                 * self.cfg.lateral_offset
             )
-            course_origin = ball_xy
+            previous_index = (
+                self._start_waypoint_index[env_ids] - 1
+            ).clamp_min(0)
+            row_ids = torch.arange(len(env_ids), device=self.device)
+            start_x = waypoint_x[previous_index]
+            start_y = local_y[row_ids, previous_index]
+            starts_at_origin = self._start_waypoint_index[env_ids] == 0
+            start_x = torch.where(starts_at_origin, 0.0, start_x)
+            start_y = torch.where(starts_at_origin, 0.0, start_y)
+            course_origin = ball_xy - torch.stack(
+                (
+                    cos_y * start_x - sin_y * start_y,
+                    sin_y * start_x + cos_y * start_y,
+                ),
+                dim=1,
+            )
+            self._course_origin_w[env_ids] = course_origin
             self._waypoint_pos_w[env_ids, :, 0] = (
                 course_origin[:, 0, None]
                 + cos_y[:, None] * waypoint_x[None, :]
@@ -6041,11 +6105,14 @@ class BallSlalomCommand(BallTargetCommand):
                 + sin_y[:, None] * waypoint_x[None, :]
                 + cos_y[:, None] * local_y
             )
-            first_target = self._waypoint_pos_w[env_ids, 0]
-            first_direction = first_target - ball_xy
-            self._initial_direction_w[env_ids] = first_direction / torch.linalg.vector_norm(
-                first_direction, dim=1
-            )[:, None]
+            current_target = self._waypoint_pos_w[
+                env_ids, self._start_waypoint_index[env_ids]
+            ]
+            initial_direction = current_target - ball_xy
+            self._initial_direction_w[env_ids] = (
+                initial_direction
+                / torch.linalg.vector_norm(initial_direction, dim=1)[:, None]
+            )
 
             local_points = [(0.0, 0.0)] + [
                 (
@@ -6055,14 +6122,31 @@ class BallSlalomCommand(BallTargetCommand):
                 )
                 for index in range(len(self.cfg.cone_x))
             ]
-            course_length = sum(
-                math.hypot(
-                    local_points[index][0] - local_points[index - 1][0],
-                    local_points[index][1] - local_points[index - 1][1],
-                )
-                for index in range(1, len(local_points))
+            segment_lengths = torch.tensor(
+                [
+                    math.hypot(
+                        local_points[index][0] - local_points[index - 1][0],
+                        local_points[index][1] - local_points[index - 1][1],
+                    )
+                    for index in range(1, len(local_points))
+                ],
+                device=self.device,
+                dtype=ball_xy.dtype,
             )
-            self._sample_distance[env_ids] = course_length
+            course_lengths = torch.cumsum(segment_lengths, dim=0)
+            remaining_distance = course_lengths[
+                self._total_waypoints[env_ids] - 1
+            ]
+            completed_prefix_distance = torch.where(
+                self._start_waypoint_index[env_ids] == 0,
+                0.0,
+                course_lengths[
+                    (self._start_waypoint_index[env_ids] - 1).clamp_min(0)
+                ],
+            )
+            self._sample_distance[env_ids] = (
+                remaining_distance - completed_prefix_distance
+            )
             self._sample_angle[env_ids] = torch.where(
                 self._course_side[env_ids] > 0.0,
                 math.pi / 2.0,
@@ -6085,10 +6169,10 @@ class BallSlalomCommand(BallTargetCommand):
             current_target - self._ball.data.root_link_pos_w[:, :2], dim=1
         )
         ball_from_origin = (
-            self._ball.data.root_link_pos_w[:, :2] - self._start_ball_pos_w
+            self._ball.data.root_link_pos_w[:, :2] - self._course_origin_w
         )
         robot_from_origin = (
-            self._robot.data.root_link_pos_w[:, :2] - self._start_ball_pos_w
+            self._robot.data.root_link_pos_w[:, :2] - self._course_origin_w
         )
         ball_course_x = (ball_from_origin * self._course_forward_w).sum(dim=1)
         ball_course_y = (ball_from_origin * self._course_lateral_w).sum(dim=1)
@@ -6169,6 +6253,7 @@ class BallSlalomCommand(BallTargetCommand):
             (self.cfg.preview_distance - target_distance)
             / (self.cfg.preview_distance - self.cfg.goal_radius)
         ).clamp(0.0, 1.0)
+        preview *= ball_past_cone
         preview_direction_w = torch.lerp(
             direction_w, following_direction_w, preview[:, None]
         )
@@ -6223,6 +6308,8 @@ class BallSlalomCommandCfg(BallTargetCommandCfg):
     class_type: type = BallSlalomCommand
     course_asset_name: str = "slalom_course"
     cone_x: tuple[float, ...] = (0.35, 0.70, 1.05)
+    active_waypoints: int = 3
+    start_waypoint_probs: tuple[float, ...] = (1.0, 0.0, 0.0)
     lateral_offset: float = 0.12
     waypoint_clearance: float = 0.12
     route_lateral_margin: float = 0.06
@@ -6851,7 +6938,8 @@ def ball_slalom_waypoints_completed(
     command_name: str = "body_pose",
 ) -> torch.Tensor:
     command = _ball_slalom_command(env, command_name)
-    return command.waypoint_index.float() + command.completed.float()
+    completed = command.waypoint_index - command.start_waypoint_index
+    return completed.float() + command.completed.float()
 
 
 def ball_slalom_course_completion(
@@ -6859,9 +6947,10 @@ def ball_slalom_course_completion(
     command_name: str = "body_pose",
 ) -> torch.Tensor:
     command = _ball_slalom_command(env, command_name)
+    sampled_waypoints = command.total_waypoints - command.start_waypoint_index
     return ball_slalom_waypoints_completed(
         env, command_name
-    ) / command.total_waypoints.float()
+    ) / sampled_waypoints.float()
 
 
 def ball_slalom_success(
@@ -6923,6 +7012,25 @@ def slalom_obstacle_contact_cost(
     return (ball_contact | robot_contact).float()
 
 
+def slalom_ball_clearance_cost(
+    env: ManagerBasedRlEnv,
+    command_name: str = "body_pose",
+    asset_name: str = "ball",
+    clearance_distance: float = 0.10,
+) -> torch.Tensor:
+    """Non-negative linear cost inside the current cone's safety clearance."""
+    if clearance_distance <= 0.0:
+        raise ValueError("clearance_distance must be positive")
+    command = _ball_slalom_command(env, command_name)
+    ball: Entity = env.scene[asset_name]
+    distance = torch.linalg.vector_norm(
+        ball.data.root_link_pos_w[:, :2] - command.current_cone_pos_w,
+        dim=1,
+    )
+    cost = (1.0 - distance / clearance_distance).clamp(min=0.0)
+    return cost * (~command.completed).float()
+
+
 def slalom_obstacle_contact(
     env: ManagerBasedRlEnv,
     ball_sensor_name: str,
@@ -6941,7 +7049,7 @@ def slalom_course_curriculum(
     command_name: str,
     stages: list[dict],
 ) -> torch.Tensor:
-    """Increase path curvature while preserving the complete three-point course."""
+    """Increase path curvature and extend the active cone prefix."""
     del env_ids
     command = _ball_slalom_command(env, command_name)
     current = stages[0]
@@ -6950,7 +7058,9 @@ def slalom_course_curriculum(
             current = stage
     command.cfg.lateral_offset = current["lateral_offset"]
     command.cfg.goal_radius = current["goal_radius"]
-    return torch.tensor(current["lateral_offset"])
+    command.cfg.active_waypoints = current["active_waypoints"]
+    command.cfg.start_waypoint_probs = current["start_waypoint_probs"]
+    return torch.tensor(float(current["active_waypoints"]))
 
 
 def invalid_ball_contact_cost(
