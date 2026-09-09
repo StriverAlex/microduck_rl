@@ -49,9 +49,8 @@ SLALOM_INITIAL_GOAL_RADIUS = DRIBBLE_GOAL_RADIUS
 SLALOM_MEDIUM_GOAL_RADIUS = 0.10
 SLALOM_DISTANCE_SCALE = DRIBBLE_TARGET_DISTANCE_SCALE
 SLALOM_OBSTACLE_COST_WEIGHT = -1.0
-SLALOM_ROUTE_CLEARANCE_APPROACH_DISTANCE = 0.20
-SLALOM_ROUTE_CLEARANCE_MARGIN = 0.10
-SLALOM_ROUTE_CLEARANCE_COST_WEIGHT = -2.0
+SLALOM_BALL_CLEARANCE_DISTANCE = 0.10
+SLALOM_BALL_CLEARANCE_COST_WEIGHT = -4.0
 SLALOM_CONTROL_DISTANCE_COST_WEIGHT = -5.0
 SLALOM_MIN_BALL_FORWARD = -DRIBBLE_CONTROL_RADIUS
 SLALOM_INITIAL_TERMINATION_COST_WEIGHT = -300.0
@@ -139,14 +138,13 @@ def make_microduck_ball_slalom_env_cfg(
             "robot_sensor_name": robot_marker_contact.name,
         },
     )
-    cfg.rewards["route_clearance"] = RewardTermCfg(
-        func=microduck_mdp.slalom_route_clearance_cost,
-        weight=SLALOM_ROUTE_CLEARANCE_COST_WEIGHT,
+    cfg.rewards["ball_cone_clearance"] = RewardTermCfg(
+        func=microduck_mdp.slalom_ball_clearance_cost,
+        weight=SLALOM_BALL_CLEARANCE_COST_WEIGHT,
         params={
             "command_name": "body_pose",
-            "asset_names": ("ball", "robot"),
-            "approach_distance": SLALOM_ROUTE_CLEARANCE_APPROACH_DISTANCE,
-            "clearance_margin": SLALOM_ROUTE_CLEARANCE_MARGIN,
+            "asset_name": "ball",
+            "clearance_distance": SLALOM_BALL_CLEARANCE_DISTANCE,
         },
     )
     cfg.terminations["obstacle_contact"] = TerminationTermCfg(
@@ -232,13 +230,12 @@ def make_microduck_ball_slalom_env_cfg(
                 },
                 reduce="mean",
             ),
-            "route_clearance_cost": MetricsTermCfg(
-                func=microduck_mdp.slalom_route_clearance_cost,
+            "ball_cone_clearance_cost": MetricsTermCfg(
+                func=microduck_mdp.slalom_ball_clearance_cost,
                 params={
                     "command_name": "body_pose",
-                    "asset_names": ("ball", "robot"),
-                    "approach_distance": SLALOM_ROUTE_CLEARANCE_APPROACH_DISTANCE,
-                    "clearance_margin": SLALOM_ROUTE_CLEARANCE_MARGIN,
+                    "asset_name": "ball",
+                    "clearance_distance": SLALOM_BALL_CLEARANCE_DISTANCE,
                 },
                 reduce="mean",
             ),

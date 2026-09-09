@@ -11,6 +11,8 @@ from mjlab_microduck.tasks.microduck_ball_dribble_env_cfg import (
     make_microduck_ball_dribble_env_cfg,
 )
 from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
+    SLALOM_BALL_CLEARANCE_COST_WEIGHT,
+    SLALOM_BALL_CLEARANCE_DISTANCE,
     SLALOM_COM_RANDOMIZATION_RANGE,
     SLALOM_CONE_X,
     SLALOM_CONTROL_DISTANCE_COST_WEIGHT,
@@ -37,9 +39,6 @@ from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
     SLALOM_PROGRESS_REWARD_WEIGHT,
     SLALOM_PUSH_RANGE,
     SLALOM_ROUTE_LATERAL_MARGIN,
-    SLALOM_ROUTE_CLEARANCE_APPROACH_DISTANCE,
-    SLALOM_ROUTE_CLEARANCE_COST_WEIGHT,
-    SLALOM_ROUTE_CLEARANCE_MARGIN,
     SLALOM_SMALL_LATERAL_OFFSET,
     SLALOM_SUCCESS_REWARD_WEIGHT,
     SLALOM_TAIL_BALANCED_START_PROBS,
@@ -314,22 +313,20 @@ def test_slalom_obstacle_contact_is_a_nonnegative_cost_with_negative_weight():
             assert sensor.history_length == cfg.decimation
 
 
-def test_slalom_route_clearance_is_a_nonnegative_cost_with_negative_weight():
+def test_slalom_ball_clearance_is_a_nonnegative_cost_with_negative_weight():
     cfg = make_microduck_ball_slalom_env_cfg()
-    cost = cfg.rewards["route_clearance"]
+    cost = cfg.rewards["ball_cone_clearance"]
 
-    assert cost.func is mdp.slalom_route_clearance_cost
-    assert cost.weight == SLALOM_ROUTE_CLEARANCE_COST_WEIGHT
+    assert cost.func is mdp.slalom_ball_clearance_cost
+    assert cost.weight == SLALOM_BALL_CLEARANCE_COST_WEIGHT
     assert cost.weight < 0.0
     assert cost.params == {
         "command_name": "body_pose",
-        "asset_names": ("ball", "robot"),
-        "approach_distance": SLALOM_ROUTE_CLEARANCE_APPROACH_DISTANCE,
-        "clearance_margin": SLALOM_ROUTE_CLEARANCE_MARGIN,
+        "asset_name": "ball",
+        "clearance_distance": SLALOM_BALL_CLEARANCE_DISTANCE,
     }
-    assert "ball_cone_clearance" not in cfg.rewards
-    metric = cfg.metrics["route_clearance_cost"]
-    assert metric.func is mdp.slalom_route_clearance_cost
+    metric = cfg.metrics["ball_cone_clearance_cost"]
+    assert metric.func is mdp.slalom_ball_clearance_cost
     assert metric.params == cost.params
     assert metric.reduce == "mean"
 

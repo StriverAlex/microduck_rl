@@ -6023,26 +6023,6 @@ class BallSlalomCommand(BallTargetCommand):
         )[self._waypoint_index]
         return self._course_origin_w + self._course_forward_w * cone_x[:, None]
 
-    def current_cone_route_state(
-        self, position_w: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return longitudinal gap and signed correct-side margin to the active cone."""
-        offset = position_w[:, :2] - self._course_origin_w
-        route_x = (offset * self._course_forward_w).sum(dim=1)
-        route_y = (offset * self._course_lateral_w).sum(dim=1)
-        cone_x = torch.as_tensor(
-            self.cfg.cone_x,
-            device=self.device,
-            dtype=route_x.dtype,
-        )[self._waypoint_index]
-        alternating = torch.where(
-            self._waypoint_index.remainder(2) == 0,
-            torch.ones_like(self._course_side),
-            -torch.ones_like(self._course_side),
-        )
-        expected_side = self._course_side * alternating
-        return cone_x - route_x, expected_side * route_y
-
     def _resample_command(self, env_ids: torch.Tensor) -> None:
         if len(env_ids) == 0:
             return
@@ -7032,32 +7012,23 @@ def slalom_obstacle_contact_cost(
     return (ball_contact | robot_contact).float()
 
 
-def slalom_route_clearance_cost(
+def slalom_ball_clearance_cost(
     env: ManagerBasedRlEnv,
     command_name: str = "body_pose",
-    asset_names: tuple[str, ...] = ("ball", "robot"),
-    approach_distance: float = 0.20,
-    clearance_margin: float = 0.10,
+    asset_name: str = "ball",
+    clearance_distance: float = 0.10,
 ) -> torch.Tensor:
-    """Non-negative approach cost for insufficient active-cone side clearance."""
-    if not asset_names:
-        raise ValueError("asset_names must be non-empty")
-    if approach_distance <= 0.0:
-        raise ValueError("approach_distance must be positive")
-    if clearance_margin <= 0.0:
-        raise ValueError("clearance_margin must be positive")
+    """Non-negative linear cost inside the current cone's safety clearance."""
+    if clearance_distance <= 0.0:
+        raise ValueError("clearance_distance must be positive")
     command = _ball_slalom_command(env, command_name)
-    costs: list[torch.Tensor] = []
-    for asset_name in asset_names:
-        asset: Entity = env.scene[asset_name]
-        longitudinal_gap, signed_margin = command.current_cone_route_state(
-            asset.data.root_link_pos_w
-        )
-        approach = (1.0 - longitudinal_gap / approach_distance).clamp(0.0, 1.0)
-        deficit = (1.0 - signed_margin / clearance_margin).clamp(0.0, 1.0)
-        before_target = longitudinal_gap >= -command.cfg.waypoint_clearance
-        costs.append(approach * deficit * before_target.float())
-    return torch.stack(costs, dim=1).amax(dim=1) * (~command.completed).float()
+    ball: Entity = env.scene[asset_name]
+    distance = torch.linalg.vector_norm(
+        ball.data.root_link_pos_w[:, :2] - command.current_cone_pos_w,
+        dim=1,
+    )
+    cost = (1.0 - distance / clearance_distance).clamp(min=0.0)
+    return cost * (~command.completed).float()
 
 
 def slalom_obstacle_contact(

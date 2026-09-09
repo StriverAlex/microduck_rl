@@ -311,68 +311,31 @@ def test_ball_control_distance_cost_is_zero_inside_and_linear_outside(monkeypatc
     assert torch.allclose(value, torch.tensor([0.0, 0.2]))
 
 
-def test_slalom_route_clearance_cost_anticipates_the_current_cone():
+def test_slalom_ball_clearance_cost_is_nonnegative_and_zero_after_completion():
     term = _slalom_term()
     term._update_command()
-    robot = term._robot
     ball = term._ball
     env = SimpleNamespace(
-        scene={"ball": ball, "robot": robot},
+        scene={"ball": ball},
         command_manager=SimpleNamespace(get_term=lambda name: term),
     )
 
-    ball.data.root_link_pos_w[0, :2] = torch.tensor([0.45, 0.05])
-    robot.data.root_link_pos_w[0, :2] = torch.tensor([0.45, 0.12])
+    ball.data.root_link_pos_w[0, :2] = term.current_cone_pos_w + torch.tensor(
+        [[0.08, 0.0]]
+    )
     assert torch.allclose(
-        mdp.slalom_route_clearance_cost(
-            env,
-            asset_names=("ball", "robot"),
-            approach_distance=0.20,
-            clearance_margin=0.10,
-        ),
-        torch.tensor([0.25]),
+        mdp.slalom_ball_clearance_cost(env, clearance_distance=0.10),
+        torch.tensor([0.20]),
     )
 
-    ball.data.root_link_pos_w[0, :2] = torch.tensor([0.30, 0.00])
-    robot.data.root_link_pos_w[0, :2] = torch.tensor([0.30, 0.00])
-    assert mdp.slalom_route_clearance_cost(
-        env,
-        asset_names=("ball", "robot"),
-        approach_distance=0.20,
-        clearance_margin=0.10,
-    ).item() == 0.0
-
-
-def test_slalom_route_clearance_cost_uses_the_worst_entity_and_route_side():
-    term = _slalom_term()
-    term._update_command()
-    term._course_side[:] = -1.0
-    robot = term._robot
-    ball = term._ball
-    env = SimpleNamespace(
-        scene={"ball": ball, "robot": robot},
-        command_manager=SimpleNamespace(get_term=lambda name: term),
+    ball.data.root_link_pos_w[0, :2] = term.current_cone_pos_w + torch.tensor(
+        [[0.12, 0.0]]
     )
-
-    ball.data.root_link_pos_w[0, :2] = torch.tensor([0.45, -0.12])
-    robot.data.root_link_pos_w[0, :2] = torch.tensor([0.45, -0.05])
-    assert torch.allclose(
-        mdp.slalom_route_clearance_cost(
-            env,
-            asset_names=("ball", "robot"),
-            approach_distance=0.20,
-            clearance_margin=0.10,
-        ),
-        torch.tensor([0.25]),
-    )
+    assert mdp.slalom_ball_clearance_cost(env, clearance_distance=0.10).item() == 0.0
 
     term._completed[:] = True
-    assert mdp.slalom_route_clearance_cost(
-        env,
-        asset_names=("ball", "robot"),
-        approach_distance=0.20,
-        clearance_margin=0.10,
-    ).item() == 0.0
+    ball.data.root_link_pos_w[0, :2] = term.current_cone_pos_w
+    assert mdp.slalom_ball_clearance_cost(env, clearance_distance=0.10).item() == 0.0
 
 
 def test_slalom_metrics_report_ordered_completion_and_side_mass():
