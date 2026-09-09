@@ -36,7 +36,6 @@ SLALOM_FINAL_WAYPOINTS = 5
 SLALOM_FULL_COURSE_START_PROBS = (1.0, 0.0, 0.0, 0.0, 0.0)
 SLALOM_TAIL_HEAVY_START_PROBS = (0.35, 0.0, 0.25, 0.25, 0.15)
 SLALOM_TAIL_BALANCED_START_PROBS = (0.60, 0.0, 0.15, 0.15, 0.10)
-SLALOM_MIDDLE_FOCUS_START_PROBS = (0.45, 0.25, 0.20, 0.07, 0.03)
 SLALOM_INITIAL_LATERAL_OFFSET = 0.08
 SLALOM_SMALL_LATERAL_OFFSET = 0.10
 SLALOM_INTERMEDIATE_LATERAL_OFFSET = 0.12
@@ -50,8 +49,9 @@ SLALOM_INITIAL_GOAL_RADIUS = DRIBBLE_GOAL_RADIUS
 SLALOM_MEDIUM_GOAL_RADIUS = 0.10
 SLALOM_DISTANCE_SCALE = DRIBBLE_TARGET_DISTANCE_SCALE
 SLALOM_OBSTACLE_COST_WEIGHT = -1.0
-SLALOM_BALL_CLEARANCE_DISTANCE = 0.10
-SLALOM_BALL_CLEARANCE_COST_WEIGHT = -4.0
+SLALOM_ROUTE_CLEARANCE_APPROACH_DISTANCE = 0.20
+SLALOM_ROUTE_CLEARANCE_MARGIN = 0.10
+SLALOM_ROUTE_CLEARANCE_COST_WEIGHT = -2.0
 SLALOM_CONTROL_DISTANCE_COST_WEIGHT = -5.0
 SLALOM_MIN_BALL_FORWARD = -DRIBBLE_CONTROL_RADIUS
 SLALOM_INITIAL_TERMINATION_COST_WEIGHT = -300.0
@@ -139,13 +139,14 @@ def make_microduck_ball_slalom_env_cfg(
             "robot_sensor_name": robot_marker_contact.name,
         },
     )
-    cfg.rewards["ball_cone_clearance"] = RewardTermCfg(
-        func=microduck_mdp.slalom_ball_clearance_cost,
-        weight=SLALOM_BALL_CLEARANCE_COST_WEIGHT,
+    cfg.rewards["route_clearance"] = RewardTermCfg(
+        func=microduck_mdp.slalom_route_clearance_cost,
+        weight=SLALOM_ROUTE_CLEARANCE_COST_WEIGHT,
         params={
             "command_name": "body_pose",
-            "asset_name": "ball",
-            "clearance_distance": SLALOM_BALL_CLEARANCE_DISTANCE,
+            "asset_names": ("ball", "robot"),
+            "approach_distance": SLALOM_ROUTE_CLEARANCE_APPROACH_DISTANCE,
+            "clearance_margin": SLALOM_ROUTE_CLEARANCE_MARGIN,
         },
     )
     cfg.terminations["obstacle_contact"] = TerminationTermCfg(
@@ -231,12 +232,13 @@ def make_microduck_ball_slalom_env_cfg(
                 },
                 reduce="mean",
             ),
-            "ball_cone_clearance_cost": MetricsTermCfg(
-                func=microduck_mdp.slalom_ball_clearance_cost,
+            "route_clearance_cost": MetricsTermCfg(
+                func=microduck_mdp.slalom_route_clearance_cost,
                 params={
                     "command_name": "body_pose",
-                    "asset_name": "ball",
-                    "clearance_distance": SLALOM_BALL_CLEARANCE_DISTANCE,
+                    "asset_names": ("ball", "robot"),
+                    "approach_distance": SLALOM_ROUTE_CLEARANCE_APPROACH_DISTANCE,
+                    "clearance_margin": SLALOM_ROUTE_CLEARANCE_MARGIN,
                 },
                 reduce="mean",
             ),
@@ -379,20 +381,6 @@ def make_microduck_ball_slalom_env_cfg(
                     },
                     {
                         "step": 14250 * 24,
-                        "active_waypoints": SLALOM_FINAL_WAYPOINTS,
-                        "start_waypoint_probs": SLALOM_FULL_COURSE_START_PROBS,
-                        "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
-                        "goal_radius": SLALOM_GOAL_RADIUS,
-                    },
-                    {
-                        "step": 15150 * 24,
-                        "active_waypoints": SLALOM_FINAL_WAYPOINTS,
-                        "start_waypoint_probs": SLALOM_MIDDLE_FOCUS_START_PROBS,
-                        "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
-                        "goal_radius": SLALOM_GOAL_RADIUS,
-                    },
-                    {
-                        "step": 15450 * 24,
                         "active_waypoints": SLALOM_FINAL_WAYPOINTS,
                         "start_waypoint_probs": SLALOM_FULL_COURSE_START_PROBS,
                         "lateral_offset": SLALOM_FINAL_LATERAL_OFFSET,
