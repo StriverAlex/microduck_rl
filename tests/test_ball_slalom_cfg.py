@@ -13,6 +13,7 @@ from mjlab_microduck.tasks.microduck_ball_dribble_env_cfg import (
 from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
     SLALOM_BALL_CLEARANCE_COST_WEIGHT,
     SLALOM_BALL_CLEARANCE_DISTANCE,
+    SLALOM_BALL_VELOCITY_SCALE,
     SLALOM_COM_RANDOMIZATION_RANGE,
     SLALOM_CONE_X,
     SLALOM_CONTROL_DISTANCE_COST_WEIGHT,
@@ -102,7 +103,7 @@ def test_slalom_command_and_curriculum_reach_the_complete_course():
     assert command.start_waypoint_probs == SLALOM_FULL_COURSE_START_PROBS
     assert command.lateral_offset == SLALOM_INITIAL_LATERAL_OFFSET
     assert command.distance_scale == DRIBBLE_TARGET_DISTANCE_SCALE
-    assert command.ball_position_scale == DRIBBLE_CONTROL_RADIUS
+    assert command.ball_velocity_scale == SLALOM_BALL_VELOCITY_SCALE
     assert command.goal_radius == SLALOM_INITIAL_GOAL_RADIUS
     stages = cfg.curriculum["slalom_course"].params["stages"]
     assert [
