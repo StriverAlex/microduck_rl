@@ -5941,8 +5941,8 @@ class BallSlalomCommand(BallTargetCommand):
             raise ValueError("lateral_offset must be non-negative")
         if cfg.waypoint_clearance <= 0.0:
             raise ValueError("waypoint_clearance must be positive")
-        if cfg.ball_velocity_scale <= 0.0:
-            raise ValueError("ball_velocity_scale must be positive")
+        if cfg.ball_position_scale <= 0.0:
+            raise ValueError("ball_position_scale must be positive")
         if not 0.0 < cfg.route_lateral_margin <= cfg.lateral_offset:
             raise ValueError(
                 "route_lateral_margin must be positive and not exceed lateral_offset"
@@ -6275,12 +6275,11 @@ class BallSlalomCommand(BallTargetCommand):
         direction_b = torch.bmm(
             rot_wb.transpose(1, 2), direction_w_3d.unsqueeze(-1)
         ).squeeze(-1)
-        relative_ball_velocity_w = (
-            self._ball.data.root_link_lin_vel_w
-            - self._robot.data.root_link_lin_vel_w
+        ball_offset_w = (
+            self._ball.data.root_link_pos_w - self._robot.data.root_link_pos_w
         )
-        relative_ball_velocity_b = torch.bmm(
-            rot_wb.transpose(1, 2), relative_ball_velocity_w.unsqueeze(-1)
+        ball_offset_b = torch.bmm(
+            rot_wb.transpose(1, 2), ball_offset_w.unsqueeze(-1)
         ).squeeze(-1)
         active = ~self._completed
         self._command[:, :2] = direction_b[:, :2]
@@ -6289,16 +6288,12 @@ class BallSlalomCommand(BallTargetCommand):
         ).clamp(0.0, 1.0)
         self._command[:, 3] = torch.where(
             active,
-            (relative_ball_velocity_b[:, 1] / self.cfg.ball_velocity_scale).clamp(
-                -1.0, 1.0
-            ),
+            (ball_offset_b[:, 1] / self.cfg.ball_position_scale).clamp(-1.0, 1.0),
             0.0,
         )
         self._command[:, 4] = torch.where(
             active,
-            (relative_ball_velocity_b[:, 0] / self.cfg.ball_velocity_scale).clamp(
-                -1.0, 1.0
-            ),
+            (ball_offset_b[:, 0] / self.cfg.ball_position_scale).clamp(-1.0, 1.0),
             0.0,
         )
         self._command[:, 5] = torch.where(
@@ -6308,7 +6303,7 @@ class BallSlalomCommand(BallTargetCommand):
 
 @_dataclass(kw_only=True)
 class BallSlalomCommandCfg(BallTargetCommandCfg):
-    """Sequential course guidance with robot-frame relative ball velocity."""
+    """Sequential alternating course sampled in the robot heading frame."""
 
     class_type: type = BallSlalomCommand
     course_asset_name: str = "slalom_course"
@@ -6318,7 +6313,7 @@ class BallSlalomCommandCfg(BallTargetCommandCfg):
     lateral_offset: float = 0.12
     waypoint_clearance: float = 0.12
     route_lateral_margin: float = 0.06
-    ball_velocity_scale: float = 1.0
+    ball_position_scale: float = 0.30
     preview_distance: float = 0.25
     ranges: tuple[tuple[float, float], tuple[float, float]] = (
         (0.0, 0.0),

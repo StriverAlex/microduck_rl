@@ -1,10 +1,9 @@
 """Sequential five-marker ball slalom for Microduck.
 
 The actor keeps the BallDribble 61D observation contract.  Its body command
-contains the ball-to-waypoint direction, relative ball velocity, and the sign
-of the next turn.  Ball-relative position remains available through the twist
-command.  The physical markers remain collision-enabled and alternate to the
-left and right of the desired ball path.
+contains the ball-to-waypoint direction, the robot-to-ball position, and the
+sign of the next turn.  The physical markers remain collision-enabled and
+alternate to the left and right of the desired ball path.
 """
 
 from copy import deepcopy
@@ -49,7 +48,6 @@ SLALOM_GOAL_RADIUS = 0.06
 SLALOM_INITIAL_GOAL_RADIUS = DRIBBLE_GOAL_RADIUS
 SLALOM_MEDIUM_GOAL_RADIUS = 0.10
 SLALOM_DISTANCE_SCALE = DRIBBLE_TARGET_DISTANCE_SCALE
-SLALOM_BALL_VELOCITY_SCALE = 1.0
 SLALOM_OBSTACLE_COST_WEIGHT = -1.0
 SLALOM_BALL_CLEARANCE_DISTANCE = 0.10
 SLALOM_BALL_CLEARANCE_COST_WEIGHT = -4.0
@@ -127,7 +125,7 @@ def make_microduck_ball_slalom_env_cfg(
         ),
         waypoint_clearance=SLALOM_WAYPOINT_CLEARANCE,
         route_lateral_margin=SLALOM_ROUTE_LATERAL_MARGIN,
-        ball_velocity_scale=SLALOM_BALL_VELOCITY_SCALE,
+        ball_position_scale=DRIBBLE_CONTROL_RADIUS,
         distance_scale=SLALOM_DISTANCE_SCALE,
         goal_radius=SLALOM_GOAL_RADIUS if play else SLALOM_INITIAL_GOAL_RADIUS,
     )

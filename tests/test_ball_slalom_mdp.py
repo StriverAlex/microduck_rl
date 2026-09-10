@@ -1,10 +1,8 @@
 from types import SimpleNamespace
 
 import torch
-from tensordict import TensorDict
 
 from mjlab_microduck.tasks import mdp
-from mjlab_microduck.tasks.symmetry import microduck_vel_symmetry
 
 
 def _identity_quaternions(num_envs: int) -> torch.Tensor:
@@ -36,7 +34,7 @@ def _slalom_term() -> mdp.BallSlalomCommand:
         lateral_offset=0.16,
         waypoint_clearance=0.04,
         route_lateral_margin=0.06,
-        ball_velocity_scale=1.00,
+        ball_position_scale=0.30,
         preview_distance=0.25,
         distance_scale=1.0,
         goal_radius=0.08,
@@ -45,14 +43,10 @@ def _slalom_term() -> mdp.BallSlalomCommand:
         data=SimpleNamespace(
             root_link_quat_w=_identity_quaternions(1),
             root_link_pos_w=torch.zeros(1, 3),
-            root_link_lin_vel_w=torch.tensor([[0.10, -0.20, 0.00]]),
         )
     )
     term._ball = SimpleNamespace(
-        data=SimpleNamespace(
-            root_link_pos_w=torch.tensor([[0.10, 0.00, 0.035]]),
-            root_link_lin_vel_w=torch.tensor([[0.70, -0.50, 0.00]]),
-        )
+        data=SimpleNamespace(root_link_pos_w=torch.tensor([[0.10, 0.00, 0.035]]))
     )
     term._course = _Course()
     term._command = torch.zeros(1, 6)
@@ -101,34 +95,13 @@ def test_slalom_waypoints_alternate_and_course_is_anchored_to_ball():
     assert torch.allclose(term.current_cone_pos_w, torch.tensor([[0.55, 0.00]]))
 
 
-def test_slalom_command_exposes_relative_ball_velocity_in_mirror_compatible_slots():
+def test_slalom_command_exposes_ball_position_in_mirror_compatible_slots():
     term = _slalom_term()
+    term._ball.data.root_link_pos_w[0, :2] = torch.tensor([0.15, -0.06])
 
     term._update_command()
 
-    assert torch.allclose(term.command[0, 3:5], torch.tensor([-0.30, 0.60]))
-
-
-def test_slalom_velocity_command_is_zero_after_course_completion():
-    term = _slalom_term()
-    term._completed[:] = True
-
-    term._update_command()
-
-    assert torch.equal(term.command[0, 3:5], torch.zeros(2))
-
-
-def test_slalom_velocity_slots_follow_61d_bilateral_symmetry():
-    actor = torch.zeros(1, 61)
-    actor[0, 58:60] = torch.tensor([-0.30, 0.60])
-    critic = torch.zeros(1, 80)
-    obs = TensorDict({"actor": actor, "critic": critic}, batch_size=[1])
-
-    mirrored_obs, _ = microduck_vel_symmetry(None, obs, None)
-
-    assert torch.equal(
-        mirrored_obs["actor"][1, 58:60], torch.tensor([0.30, 0.60])
-    )
+    assert torch.allclose(term.command[0, 3:5], torch.tensor([-0.20, 0.50]))
 
 
 def test_slalom_command_exposes_the_next_turn_before_reaching_the_waypoint():
