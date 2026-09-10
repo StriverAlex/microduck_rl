@@ -13,6 +13,7 @@ from mjlab.envs import mdp as base_mdp
 from mjlab.managers import (
     CurriculumTermCfg,
     MetricsTermCfg,
+    ObservationTermCfg,
     RewardTermCfg,
     TerminationTermCfg,
 )
@@ -44,6 +45,7 @@ SLALOM_FINAL_LATERAL_OFFSET = 0.16
 SLALOM_WAYPOINT_CLEARANCE = 0.04
 SLALOM_ROUTE_LATERAL_MARGIN = 0.06
 SLALOM_PREVIEW_DISTANCE = 0.40
+SLALOM_MARKER_POSITION_SCALE = 0.50
 SLALOM_GOAL_RADIUS = 0.06
 SLALOM_INITIAL_GOAL_RADIUS = DRIBBLE_GOAL_RADIUS
 SLALOM_MEDIUM_GOAL_RADIUS = 0.10
@@ -129,6 +131,14 @@ def make_microduck_ball_slalom_env_cfg(
         distance_scale=SLALOM_DISTANCE_SCALE,
         goal_radius=SLALOM_GOAL_RADIUS if play else SLALOM_INITIAL_GOAL_RADIUS,
     )
+    for group in ("actor", "critic"):
+        cfg.observations[group].terms["head_command"] = ObservationTermCfg(
+            func=microduck_mdp.ball_slalom_marker_offsets_in_base,
+            params={
+                "command_name": "body_pose",
+                "position_scale": SLALOM_MARKER_POSITION_SCALE,
+            },
+        )
 
     cfg.rewards["obstacle_contact"] = RewardTermCfg(
         func=microduck_mdp.slalom_obstacle_contact_cost,

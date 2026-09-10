@@ -32,6 +32,7 @@ from mjlab_microduck.tasks.microduck_ball_slalom_env_cfg import (
     SLALOM_INTERMEDIATE_WAYPOINTS,
     SLALOM_LARGE_LATERAL_OFFSET,
     SLALOM_LEARNING_RATE,
+    SLALOM_MARKER_POSITION_SCALE,
     SLALOM_MEDIUM_GOAL_RADIUS,
     SLALOM_MIN_BALL_FORWARD,
     SLALOM_OBSTACLE_COST_WEIGHT,
@@ -104,6 +105,13 @@ def test_slalom_command_and_curriculum_reach_the_complete_course():
     assert command.distance_scale == DRIBBLE_TARGET_DISTANCE_SCALE
     assert command.ball_position_scale == DRIBBLE_CONTROL_RADIUS
     assert command.goal_radius == SLALOM_INITIAL_GOAL_RADIUS
+    for group in ("actor", "critic"):
+        marker_observation = cfg.observations[group].terms["head_command"]
+        assert marker_observation.func is mdp.ball_slalom_marker_offsets_in_base
+        assert marker_observation.params == {
+            "command_name": "body_pose",
+            "position_scale": SLALOM_MARKER_POSITION_SCALE,
+        }
     stages = cfg.curriculum["slalom_course"].params["stages"]
     assert [
         (

@@ -1,8 +1,10 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from mjlab_microduck.tasks import mdp
+from mjlab_microduck.tasks.symmetry import microduck_vel_symmetry
 
 
 def _identity_quaternions(num_envs: int) -> torch.Tensor:
@@ -38,6 +40,8 @@ def _slalom_term() -> mdp.BallSlalomCommand:
         preview_distance=0.25,
         distance_scale=1.0,
         goal_radius=0.08,
+        robot_asset_name="robot",
+        ball_asset_name="ball",
     )
     term._robot = SimpleNamespace(
         data=SimpleNamespace(
@@ -102,6 +106,69 @@ def test_slalom_command_exposes_ball_position_in_mirror_compatible_slots():
     term._update_command()
 
     assert torch.allclose(term.command[0, 3:5], torch.tensor([-0.20, 0.50]))
+
+
+def test_slalom_marker_observation_preserves_existing_guidance():
+    term = _slalom_term()
+    term._update_command()
+    original_guidance = term.command.clone()
+    term._robot.data.root_link_pos_w[0, :2] = torch.tensor([0.20, 0.10])
+    term._ball.data.root_link_pos_w[0, :2] = torch.tensor([0.30, -0.05])
+    env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        scene={"robot": term._robot, "ball": term._ball},
+        command_manager=SimpleNamespace(get_term=lambda _name: term),
+    )
+
+    observation = mdp.ball_slalom_marker_offsets_in_base(
+        env, position_scale=0.50
+    )
+
+    assert torch.allclose(observation, torch.tensor([[0.70, 0.50, -0.20, 0.10]]))
+    assert torch.equal(term.command, original_guidance)
+
+
+def test_slalom_marker_observation_is_zero_after_course_ends():
+    term = _slalom_term()
+    term._update_command()
+    term._completed[:] = True
+    env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        scene={"robot": term._robot, "ball": term._ball},
+        command_manager=SimpleNamespace(get_term=lambda _name: term),
+    )
+
+    observation = mdp.ball_slalom_marker_offsets_in_base(env)
+
+    assert torch.equal(observation, torch.zeros(1, 4))
+
+
+def test_slalom_marker_observation_rejects_nonpositive_scale():
+    term = _slalom_term()
+    env = SimpleNamespace(
+        command_manager=SimpleNamespace(get_term=lambda _name: term),
+    )
+
+    with pytest.raises(ValueError, match="position_scale must be positive"):
+        mdp.ball_slalom_marker_offsets_in_base(env, position_scale=0.0)
+
+
+def test_slalom_marker_observation_uses_the_existing_head_slot_mirror_signs():
+    actor = torch.zeros(1, 61)
+    actor[0, 51:55] = torch.tensor([0.70, 0.50, -0.20, 0.10])
+
+    mirrored_obs, _ = microduck_vel_symmetry(
+        None,
+        {"actor": actor, "critic": torch.zeros(1, 80)},
+        torch.zeros(1, 14),
+    )
+
+    assert torch.equal(
+        mirrored_obs["actor"][1, 51:55],
+        torch.tensor([0.70, 0.50, 0.20, -0.10]),
+    )
 
 
 def test_slalom_command_exposes_the_next_turn_before_reaching_the_waypoint():

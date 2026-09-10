@@ -6826,6 +6826,52 @@ def _ball_slalom_command(
     return term
 
 
+def ball_slalom_marker_offsets_in_base(
+    env: ManagerBasedRlEnv,
+    command_name: str = "body_pose",
+    position_scale: float = 0.50,
+) -> torch.Tensor:
+    """Current cone offsets from the robot and ball in the robot frame.
+
+    The 4D layout is ``[robot_x, ball_x, robot_y, ball_y]`` so the existing
+    bilateral mirror signs for the head-command slots preserve both vectors.
+    """
+    if position_scale <= 0.0:
+        raise ValueError("position_scale must be positive")
+    command = _ball_slalom_command(env, command_name)
+    robot: Entity = env.scene[command.cfg.robot_asset_name]
+    ball: Entity = env.scene[command.cfg.ball_asset_name]
+    cone_pos_w = command.current_cone_pos_w
+    offsets_w = torch.stack(
+        (
+            cone_pos_w - robot.data.root_link_pos_w[:, :2],
+            cone_pos_w - ball.data.root_link_pos_w[:, :2],
+        ),
+        dim=1,
+    )
+    offsets_w_3d = torch.zeros(
+        env.num_envs, 2, 3, device=env.device, dtype=offsets_w.dtype
+    )
+    offsets_w_3d[:, :, :2] = offsets_w
+    rot_wb = matrix_from_quat(robot.data.root_link_quat_w)
+    offsets_b = torch.bmm(offsets_w_3d, rot_wb)[:, :, :2]
+    observation = torch.stack(
+        (
+            offsets_b[:, 0, 0],
+            offsets_b[:, 1, 0],
+            offsets_b[:, 0, 1],
+            offsets_b[:, 1, 1],
+        ),
+        dim=1,
+    )
+    active = ~(command.completed | command.invalid)
+    return torch.where(
+        active[:, None],
+        (observation / position_scale).clamp(-1.0, 1.0),
+        torch.zeros_like(observation),
+    )
+
+
 def ball_target_speed_overshoot_cost(
     env: ManagerBasedRlEnv,
     target_command_name: str,
